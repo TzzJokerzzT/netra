@@ -35,6 +35,8 @@ pub enum Command {
     Capture(CaptureArgs),
     /// Inspect stored sessions.
     Sessions(SessionsArgs),
+    /// Manage the local certificate authority used for TLS interception.
+    Ca(CaArgs),
     /// Show the effective configuration and data locations.
     Config(ConfigArgs),
 }
@@ -59,6 +61,37 @@ pub struct CaptureArgs {
     /// Chrome/Chromium debugging endpoint used by `--source cdp`.
     #[arg(long, value_name = "HOST:PORT", default_value = "127.0.0.1:9222")]
     pub cdp_endpoint: String,
+
+    /// Override the configured proxy port (0 picks a free one).
+    #[arg(long, value_name = "PORT")]
+    pub proxy_port: Option<u16>,
+}
+
+/// Arguments of `netra ca`.
+#[derive(Debug, Args)]
+pub struct CaArgs {
+    /// Certificate authority subcommand.
+    #[command(subcommand)]
+    pub command: CaCommand,
+}
+
+/// `netra ca` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum CaCommand {
+    /// Create the local CA if it does not exist yet.
+    Init,
+    /// Copy the CA certificate somewhere a browser can import it.
+    Export(ExportCaArgs),
+    /// Show where the material lives and its fingerprint.
+    Show,
+}
+
+/// Arguments of `netra ca export`.
+#[derive(Debug, Args)]
+pub struct ExportCaArgs {
+    /// Destination of the PEM certificate.
+    #[arg(long, short, value_name = "PATH")]
+    pub output: PathBuf,
 }
 
 /// Arguments of `netra sessions`.

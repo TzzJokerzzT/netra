@@ -135,20 +135,69 @@ fn cdp_capture_without_a_browser_fails_clearly_and_leaves_no_session() {
 }
 
 #[test]
-fn proxy_capture_names_the_missing_milestone() {
+fn ca_commands_refuse_to_invent_material() {
     let sandbox = Sandbox::new();
     sandbox
         .command()
-        .args(["capture", "--source", "proxy"])
+        .args(["ca", "show"])
         .assert()
-        .code(3)
-        .stderr(predicate::str::contains("milestone M4"));
+        .code(4)
+        .stderr(predicate::str::contains("netra ca init"));
     sandbox
         .command()
-        .args(["capture", "--source", "both"])
+        .args(["ca", "init"])
         .assert()
-        .code(3)
-        .stderr(predicate::str::contains("milestone M4"));
+        .success()
+        .stdout(predicate::str::contains("certificate authority ready"));
+    let certificate = sandbox.data_dir().join("ca").join("netra-ca.pem");
+    assert!(certificate.exists());
+    sandbox.command().args(["ca", "init"]).assert().success();
+    let exported = sandbox.directory.path().join("trusted-ca.pem");
+    sandbox
+        .command()
+        .args(["ca", "export", "--output"])
+        .arg(&exported)
+        .assert()
+        .success();
+    let pem = fs::read_to_string(&exported).unwrap();
+    assert!(pem.contains("BEGIN CERTIFICATE"));
+    sandbox
+        .command()
+        .args(["ca", "show"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SHA-256"))
+        .stdout(predicate::str::contains("disabled"));
+}
+
+#[test]
+fn proxy_capture_starts_and_is_reported_in_the_config() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .command()
+        .arg("config")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tls interception disabled"));
+}
+
+#[test]
+fn interception_without_a_ca_requires_an_explicit_init() {
+    let sandbox = Sandbox::new();
+    let config = sandbox.directory.path().join("proxy-config.json");
+    fs::write(
+        &config,
+        r#"{"proxy":{"bind_addr":"127.0.0.1","port":18080,"max_connections":4,"intercept_tls":true}}"#,
+    )
+    .unwrap();
+    sandbox
+        .command()
+        .arg("--config")
+        .arg(&config)
+        .args(["capture", "--source", "proxy"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("netra ca init"));
 }
 
 #[test]

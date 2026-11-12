@@ -9,7 +9,11 @@ use netra_application::{
     AppEvent, ApplicationError, CaptureRuntime, QueryService, SessionService, export::to_har_string,
 };
 use netra_capture::{
-    cdp::CdpCaptureProvider, cdp::discovery::CdpEndpoint, demo::DemoCaptureProvider,
+    cdp::CdpCaptureProvider,
+    cdp::discovery::CdpEndpoint,
+    demo::DemoCaptureProvider,
+    proxy::ProxyCaptureProvider,
+    proxy::ca::{CaPaths, CertificateAuthority},
 };
 use netra_core::{
     domain::{CaptureSession, ExchangeFilter, SessionId, SourceSelection},
@@ -18,7 +22,10 @@ use netra_core::{
 
 use crate::{
     app::Bootstrap,
-    args::{CaptureArgs, ConfigArgs, DeleteArgs, ExportArgs, ListArgs, RenameArgs, SaveArgs},
+    args::{
+        CaptureArgs, ConfigArgs, DeleteArgs, ExportArgs, ExportCaArgs, ListArgs, RenameArgs,
+        SaveArgs,
+    },
     exit::ExitCode,
 };
 
@@ -242,7 +249,17 @@ pub async fn capture(bootstrap: &Bootstrap, args: &CaptureArgs) -> ExitCode {
     let selection: SourceSelection = args.source.into();
     // Providers are resolved before the session row exists: a capture that
     // cannot start must not leave an empty session behind.
-    let providers = match providers_for(selection, args.demo, &args.cdp_endpoint) {
+    let mut proxy_settings = bootstrap.config.proxy.clone();
+    if let Some(port) = args.proxy_port {
+        proxy_settings.port = port;
+    }
+    let providers = match providers_for(
+        selection,
+        args.demo,
+        &args.cdp_endpoint,
+        &proxy_settings,
+        &bootstrap.config.data_dir,
+    ) {
         Ok(providers) => providers,
         Err(error) => {
             let code = crate::exit::exit_code_for(&error);
@@ -314,6 +331,90 @@ pub async fn capture(bootstrap: &Bootstrap, args: &CaptureArgs) -> ExitCode {
     ExitCode::Success
 }
 
+/// Runs `netra ca init`.
+pub fn ca_init(bootstrap: &Bootstrap) -> ExitCode {
+    let paths = CaPaths::under(&bootstrap.config.data_dir);
+    match CertificateAuthority::load_or_create(paths) {
+        Ok(authority) => {
+            println!("certificate authority ready");
+            println!("  certificate {}", authority.paths().certificate.display());
+            println!("  private key {}", authority.paths().key.display());
+            println!();
+            println!("Trusting it is your decision; netra never touches your trust store:");
+            println!(
+                "  netra ca export --output netra-ca.pem   # import that file in the browser or OS"
+            );
+            println!("Remove the trusted entry the same way to undo interception.");
+            ExitCode::Success
+        }
+        Err(error) => {
+            eprintln!("netra: {error}");
+            ExitCode::Failure
+        }
+    }
+}
+
+/// Runs `netra ca export`.
+pub fn ca_export(bootstrap: &Bootstrap, args: &ExportCaArgs) -> ExitCode {
+    let paths = CaPaths::under(&bootstrap.config.data_dir);
+    let authority = match CertificateAuthority::load(paths) {
+        Ok(authority) => authority,
+        Err(error) => {
+            eprintln!("netra: {error}");
+            return ExitCode::NotFound;
+        }
+    };
+    if let Some(parent) = args.output.parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("netra: cannot create {}: {error}", parent.display());
+        return ExitCode::Failure;
+    }
+    match std::fs::write(&args.output, authority.certificate_pem()) {
+        Ok(()) => {
+            println!("exported the CA certificate to {}", args.output.display());
+            println!("Import it into the browser/OS trust store, and remove it when done.");
+            ExitCode::Success
+        }
+        Err(error) => {
+            eprintln!("netra: cannot write {}: {error}", args.output.display());
+            ExitCode::Failure
+        }
+    }
+}
+
+/// Runs `netra ca show`.
+pub fn ca_show(bootstrap: &Bootstrap) -> ExitCode {
+    let paths = CaPaths::under(&bootstrap.config.data_dir);
+    let authority = match CertificateAuthority::load(paths.clone()) {
+        Ok(authority) => authority,
+        Err(error) => {
+            eprintln!("netra: {error}");
+            return ExitCode::NotFound;
+        }
+    };
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(authority.certificate_pem().as_bytes());
+    let fingerprint = digest
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":");
+    println!("certificate {}", paths.certificate.display());
+    println!("private key {}", paths.key.display());
+    println!("pem digest  SHA-256 {fingerprint}");
+    println!(
+        "interception {}",
+        if bootstrap.config.proxy.intercept_tls {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    ExitCode::Success
+}
+
 /// Builds providers for a source selection.
 ///
 /// CDP is implemented; the proxy is not, so a selection that includes it fails
@@ -322,22 +423,30 @@ fn providers_for(
     selection: SourceSelection,
     demo: bool,
     cdp_endpoint: &str,
+    proxy_settings: &netra_core::config::ProxySettings,
+    data_dir: &std::path::Path,
 ) -> Result<Vec<Box<dyn CaptureProvider>>, ApplicationError> {
     if demo {
         return Ok(vec![Box::new(DemoCaptureProvider::new())]);
     }
-    match selection {
-        SourceSelection::Cdp => {
-            let endpoint = CdpEndpoint::parse(cdp_endpoint).map_err(ApplicationError::Format)?;
-            Ok(vec![Box::new(CdpCaptureProvider::new(endpoint))])
-        }
-        SourceSelection::Proxy => Err(ApplicationError::Unsupported {
-            feature: "the HTTP/HTTPS proxy (milestone M4)",
-        }),
-        SourceSelection::Both => Err(ApplicationError::Unsupported {
-            feature: "capturing from both sources at once (the proxy arrives in milestone M4)",
-        }),
+    let mut providers: Vec<Box<dyn CaptureProvider>> = Vec::new();
+    let sources = selection.sources();
+    if sources.contains(&netra_core::domain::CaptureSource::Cdp) {
+        let endpoint = CdpEndpoint::parse(cdp_endpoint).map_err(ApplicationError::Format)?;
+        providers.push(Box::new(CdpCaptureProvider::new(endpoint)));
     }
+    if sources.contains(&netra_core::domain::CaptureSource::Proxy) {
+        providers.push(Box::new(
+            ProxyCaptureProvider::new(proxy_settings.clone(), data_dir.to_path_buf())
+                .map_err(ApplicationError::Capture)?,
+        ));
+    }
+    if providers.is_empty() {
+        return Err(ApplicationError::Conflict(
+            "no capture provider is available for this source selection".to_owned(),
+        ));
+    }
+    Ok(providers)
 }
 
 /// Loads every exchange of a session for export.

@@ -10,7 +10,7 @@ use clap::Parser;
 use netra_application::SessionService;
 
 use crate::{
-    args::{Cli, Command, SessionsCommand},
+    args::{CaCommand, Cli, Command, SessionsCommand},
     exit::ExitCode,
 };
 
@@ -43,6 +43,11 @@ async fn main() -> std::process::ExitCode {
         None => open_latest(&bootstrap).await,
         Some(Command::Capture(args)) => commands::capture(&bootstrap, &args).await,
         Some(Command::Config(args)) => commands::config(&bootstrap, &args),
+        Some(Command::Ca(args)) => match args.command {
+            CaCommand::Init => commands::ca_init(&bootstrap),
+            CaCommand::Export(export) => commands::ca_export(&bootstrap, &export),
+            CaCommand::Show => commands::ca_show(&bootstrap),
+        },
         Some(Command::Sessions(group)) => match group.command {
             SessionsCommand::List(args) => commands::sessions_list(&bootstrap, &args).await,
             SessionsCommand::Open(args) => open_named(&bootstrap, &args.session_id).await,
