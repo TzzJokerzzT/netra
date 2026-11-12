@@ -45,6 +45,14 @@ Feature branch: `feat/netra-foundation`. Specification source: `../netra_network
 - **S12 (dependencias verificadas).** "Utilizar versiones estables y compatibles verificadas al iniciar el
   proyecto." — "Si una librería propuesta no está mantenida, no es compatible o no ofrece la funcionalidad
   necesaria, investiga una alternativa y documenta la decisión antes de introducirla."
+- **S13 (M4 proxy).** "Implementar proxy HTTP. Añadir CONNECT y TLS interception. Implementar gestión segura de
+  CA. Normalizar eventos al modelo común. Añadir límites y pruebas de seguridad. Resultado: captura de
+  aplicaciones compatibles con proxy." — "Escuchar en localhost por defecto." — "Permitir modo de túnel sin
+  descifrado cuando corresponda." — "No instalar certificados en el sistema automáticamente sin consentimiento."
+  — "Proteger la clave privada con permisos restrictivos." — "No desactivar la validación TLS del cliente de
+  forma global."
+- **S14 (limitaciones documentadas).** "Documentar limitaciones como certificate pinning, QUIC/HTTP/3, protocolos
+  no HTTP y aplicaciones que ignoran el proxy."
 - **S10 (no fingir).** "No afirmes que una función está implementada si solo existe una maqueta o stub." — "Nunca
   simules una captura real con datos mock en una función que se presente como terminada."
 
@@ -66,6 +74,10 @@ Feature branch: `feat/netra-foundation`. Specification source: `../netra_network
 | T12 | S11, S12, S8 | inline | `netra-capture/cdp`: protocolo, discovery, mapeo puro de eventos Network y provider con sesiones flat, auto-attach y bodies. | `feat(capture): CDP provider for Chrome/Chromium` |
 | T13 | S11, S12 | inline | CLI `--cdp-endpoint`, `--source cdp` real; el proxy sigue nombrando M4. Fallo rápido si el proveedor no arranca. | `feat(cli): live CDP capture wiring` |
 | T14 | S11, S8 | inline | Test de integración contra Chromium real con fixture local; regresiones del traductor y de bodies. | incluido en T12 |
+| T15 | S13, S14 | inline | ADR 0007: proxy HTTP/1.1 propio, autoridad local explícita y límites compartidos. | `docs(adr): choose a hand-rolled proxy` |
+| T16 | S13, S6, S8 | inline | `netra-capture/proxy`: parser HTTP/1.1, CA con hojas por host, CONNECT en túnel e interceptación TLS, límites y timeouts. | `feat(capture): HTTP/HTTPS proxy with local authority` |
+| T17 | S13, S6, S8 | inline | `netra ca init|export|show` y `--source proxy`; captura de ambos orígenes a la vez. | `feat(cli): proxy capture and CA commands` |
+| T18 | S6, S8 | inline | Fuga encontrada en smoke real: `Referer` y URLs dentro de JSON conservaban `?token=`. Máscara de query en cualquier URL almacenada. | `fix(security): mask query values in referer headers and JSON urls` |
 
 Naming note: the original plan had 7 tasks; the delta/broadcast split made T3–T7 explicit so every commit is a
 single reviewable work unit.
@@ -126,6 +138,18 @@ single reviewable work unit.
 - **L17 (defect found during M3).** Una captura cuyo proveedor no arranca salía con código 0 y una sesión vacía.
   Ahora el runtime llama `provider.start()` antes de lanzar tareas y falla cerrado (código 1), borrando la sesión
   creada.
+- **L18 (user, verbatim).** "Comienza con el M4, realiza la verficación y de la publicación me encargo yo"
+- **L19 (decision).** M4 implementado con cliente/proxy propio (ADR 0007) en lugar de `hudsucker`: el modelo de
+  eventos, los límites y la redacción ya viven en el pipeline, y el proxy solo necesita línea de request, headers,
+  `Content-Length` y chunked. Un exchange por conexión (`Connection: close`) para que el framing no sea ambiguo.
+- **L20 (security finding, fixed).** El smoke test con Chromium real a través del proxy mostró el token en dos
+  lugares después de la redacción: el header `Referer` y una URL dentro del cuerpo JSON de la respuesta. Se extendió
+  la política: toda URL almacenada (request line, headers con URL, strings JSON con `http(s)://` o `/ruta?`) pierde
+  sus query params sensibles. Un test del pipeline cubre el caso; el smoke volvió a 0 coincidencias del token.
+- **L21 (evidence, M4).** Chromium headless con `--proxy-server` y `--proxy-bypass-list='<-loopback>'`: 15–17
+  exchanges persistidos por el proxy, incluida la petición al fixture; tests `proxy_integration` cubren HTTP,
+  CONNECT sin descifrado, interceptación TLS contra un origen TLS local, límites y el opt-in de loopback.
+  Workspace: 288 tests.
 - **L13 (user decision, verbatim).** "No lo haga manda el commit con las 1900 lineas." — the storage work unit
   stays as one commit; it is not split. Consequence, recorded so it is not mistaken for an oversight: that
   candidate cannot pass the native reviewer budget, so it carries no native review; its risk is covered by the
