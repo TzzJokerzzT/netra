@@ -3,12 +3,13 @@
 `netra` captures, inspects, filters and persists HTTP traffic from the terminal,
 in the spirit of Chrome DevTools' Network panel, `mitmproxy`, `k9s` and `lazygit`.
 
-The project is built in milestones. **What exists today is a working
-foundation**: a modular Rust workspace, a real capture pipeline with
-correlation and redaction, SQLite persistence with crash recovery, and a TUI
-that browses and inspects stored sessions. Chrome DevTools Protocol capture and
-the HTTP/HTTPS proxy are the next milestones — they are not implemented yet, and
-the CLI says so instead of pretending.
+The project is built in milestones. Milestones **M0 to M4 are implemented and
+tested**: a modular Rust workspace, a real capture pipeline with correlation and
+redaction, SQLite persistence with crash recovery, a TUI that browses and
+inspects stored sessions, live capture from Chrome/Chromium over CDP, and an
+HTTP/HTTPS proxy with an explicit local certificate authority. Replay, HAR
+import and WebSocket inspection are still open, and the CLI says so instead of
+pretending.
 
 ## Status
 
@@ -27,9 +28,84 @@ the CLI says so instead of pretending.
 whole pipeline (correlation, redaction, limits, storage, recovery) and is
 labelled as demo everywhere it appears. It is not real traffic capture.
 
+## Install
+
+`netra` is not published on crates.io yet; it installs from this checkout.
+
+### Recommended: install into a directory already in your PATH
+
+```bash
+cd netra
+cargo install --path crates/netra-cli --root ~/.local --locked
+```
+
+That puts the binary at `~/.local/bin/netra`. Most Arch/Omarchy, Debian and
+macOS setups already have `~/.local/bin` in `PATH`; check with:
+
+```bash
+echo "$PATH" | tr ':' '\n' | grep -Fx "$HOME/.local/bin"
+netra --version
+```
+
+### Alternative: let Cargo pick the location
+
+```bash
+cargo install --path crates/netra-cli --locked
+```
+
+This installs into `$CARGO_HOME/bin` (default `~/.cargo/bin`). If `netra: command
+not found` appears afterwards, that directory is not in `PATH`:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"   # add to ~/.zshrc / ~/.bashrc / config.fish
+```
+
+### Portable binary
+
+No runtime dependencies are needed beyond libc: SQLite is compiled in.
+
+```bash
+cargo build --release
+install -Dm755 target/release/netra ~/.local/bin/netra
+```
+
+### Verify the installation
+
+```bash
+netra --version
+netra config          # shows the data directory, limits, proxy and redaction state
+netra capture --demo  # synthetic capture, ~1s, proves storage + redaction work
+netra sessions list
+netra                 # TUI over the most recent session (q to quit)
+```
+
+Then start the browser source you want:
+
+```bash
+# CDP
+chromium --remote-debugging-port=9222 --user-data-dir=/tmp/netra-profile &
+netra capture --source cdp
+
+# proxy
+netra capture --source proxy --proxy-port 8080
+```
+
+### Update and uninstall
+
+```bash
+git pull && cargo install --path crates/netra-cli --root ~/.local --locked
+cargo uninstall netra-cli                       # or simply rm the netra binary
+```
+
+Uninstalling leaves captured data behind by design: it lives in
+`$XDG_DATA_HOME/netra` (default `~/.local/share/netra`). Remove that directory
+only if you also want to delete the sessions, the exported HAR files and the
+local certificate authority.
+
 ## Requirements
 
-- Rust stable (edition 2024, `rust-version = 1.85` in `Cargo.toml`).
+- Rust stable (edition 2024, `rust-version = 1.85` in `Cargo.toml`) to build
+  from source. The installed binary needs no toolchain.
 - A POSIX system for the private-permission and terminal behaviour described
   here. Linux is the tested target.
 - SQLite is compiled in (`rusqlite` with the `bundled` feature); no system
