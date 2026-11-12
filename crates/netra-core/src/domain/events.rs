@@ -5,18 +5,45 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use super::{
     body::Body,
     exchange::{CaptureSource, NetworkRequest, NetworkResponse, TimingMetrics},
 };
 
 /// Direction of a payload update.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BodyDirection {
     /// The request payload.
     Request,
     /// The response payload.
     Response,
+}
+
+impl BodyDirection {
+    /// Stable database and CLI spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Response => "response",
+        }
+    }
+
+    /// Parses the stable spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns the offending text when it is neither `request` nor `response`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "request" => Ok(Self::Request),
+            "response" => Ok(Self::Response),
+            other => Err(other.to_owned()),
+        }
+    }
 }
 
 /// Provider-issued correlation key for one exchange.

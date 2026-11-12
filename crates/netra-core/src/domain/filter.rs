@@ -319,8 +319,10 @@ mod tests {
 
     #[test]
     fn text_filter_is_case_insensitive_over_url() {
-        let mut filter = ExchangeFilter::default();
-        filter.text = Some("API.EXAMPLE".into());
+        let filter = ExchangeFilter {
+            text: Some("API.EXAMPLE".into()),
+            ..ExchangeFilter::default()
+        };
         assert!(filter.matches(&summary(
             "GET",
             "https://api.example.com/v1",
@@ -354,8 +356,10 @@ mod tests {
 
     #[test]
     fn pending_rows_do_not_satisfy_status_filters() {
-        let mut filter = ExchangeFilter::default();
-        filter.status = StatusRange::parse("2xx").unwrap();
+        let filter = ExchangeFilter {
+            status: StatusRange::parse("2xx").unwrap(),
+            ..ExchangeFilter::default()
+        };
         assert!(!filter.matches(&summary(
             "GET",
             "https://a.test/",
@@ -366,9 +370,11 @@ mod tests {
 
     #[test]
     fn method_and_failure_filters_combine() {
-        let mut filter = ExchangeFilter::default();
-        filter.methods = vec![HttpMethod::parse("POST").unwrap()];
-        filter.only_failed = true;
+        let filter = ExchangeFilter {
+            methods: vec![HttpMethod::parse("POST").unwrap()],
+            only_failed: true,
+            ..ExchangeFilter::default()
+        };
         let mut failed = summary("POST", "https://a.test/x", None, ExchangeState::Failed);
         failed.error = Some("reset".into());
         assert!(filter.matches(&failed));
@@ -388,8 +394,10 @@ mod tests {
 
     #[test]
     fn host_filter_matches_exactly() {
-        let mut filter = ExchangeFilter::default();
-        filter.host = Some("api.test".into());
+        let filter = ExchangeFilter {
+            host: Some("api.test".into()),
+            ..ExchangeFilter::default()
+        };
         assert!(filter.matches(&summary(
             "GET",
             "https://api.test/a",

@@ -642,6 +642,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexmap"
+version = "2.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
+dependencies = [
+ "equivalent",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "indoc"
 version = "2.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -806,12 +816,17 @@ dependencies = [
 name = "netra-application"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "netra-analysis",
+ "netra-capture",
  "netra-core",
+ "netra-storage",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -819,6 +834,7 @@ dependencies = [
 name = "netra-capture"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "netra-core",
  "thiserror",
@@ -864,6 +880,7 @@ dependencies = [
 name = "netra-storage"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "netra-core",
  "rusqlite",
@@ -880,6 +897,7 @@ name = "netra-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm 0.29.0",
+ "netra-analysis",
  "netra-application",
  "netra-core",
  "ratatui",
@@ -1163,6 +1181,8 @@ version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
+ "foldhash 0.2.0",
+ "indexmap",
  "itoa",
  "memchr",
  "serde",

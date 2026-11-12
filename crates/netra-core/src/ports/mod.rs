@@ -7,8 +7,9 @@ use async_trait::async_trait;
 
 use crate::{
     domain::{
-        CaptureEvent, CaptureSession, CaptureSource, ExchangeId, ExchangeQuery, ExchangeSummary,
-        NetworkExchange, SessionId, SessionSummary, Timestamp,
+        Body, BodyDirection, CaptureEvent, CaptureSession, CaptureSource, ExchangeId,
+        ExchangeQuery, ExchangeState, ExchangeSummary, ExchangeUpdate, NetworkExchange,
+        NetworkResponse, SessionId, SessionSummary, Timestamp, TimingMetrics,
     },
     error::{CaptureError, StorageResult},
 };
@@ -106,6 +107,15 @@ pub trait ExchangeRepository: Send + Sync {
     /// is missing.
     async fn upsert(&self, exchange: &NetworkExchange) -> StorageResult<()>;
 
+    /// Applies one incremental update inside a transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::StorageError::NotFound`] when the target exchange
+    /// disappeared, and [`crate::error::StorageError::Integrity`] when the parent
+    /// session is missing.
+    async fn apply(&self, update: &ExchangeUpdate) -> StorageResult<()>;
+
     /// Loads a full exchange, including headers and stored bodies.
     ///
     /// # Errors
@@ -126,6 +136,62 @@ pub trait ExchangeRepository: Send + Sync {
     ///
     /// Returns [`crate::error::StorageError::Backend`] on query failure.
     async fn counts(&self, session_id: SessionId) -> StorageResult<ExchangeCounts>;
+
+    /// Deletes the oldest exchanges of a session beyond `keep`.
+    ///
+    /// Implements the configured per-session retention so one long capture
+    /// cannot grow the database without bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::StorageError::Backend`] on write failure.
+    async fn enforce_retention(&self, session_id: SessionId, keep: u64) -> StorageResult<u64>;
+
+    /// Distinct hosts observed in a session, with request counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::StorageError::Backend`] on query failure.
+    async fn hosts(&self, session_id: SessionId) -> StorageResult<Vec<(String, u64)>>;
+
+    /// Rewrites one side of an exchange with a payload replacement.
+    ///
+    /// Used by late body retrieval: the response later reports its body, and
+    /// the stored row is updated without rewriting headers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::StorageError::NotFound`] when the exchange is missing.
+    async fn update_body(
+        &self,
+        id: ExchangeId,
+        direction: BodyDirection,
+        body: &Body,
+    ) -> StorageResult<()>;
+
+    /// Updates response header data after a late `responseReceived` event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::StorageError::NotFound`] when the exchange is missing.
+    async fn update_response(
+        &self,
+        id: ExchangeId,
+        response: &NetworkResponse,
+    ) -> StorageResult<()>;
+
+    /// Updates state, error text and timings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::StorageError::NotFound`] when the exchange is missing.
+    async fn update_state(
+        &self,
+        id: ExchangeId,
+        state: ExchangeState,
+        error: Option<&str>,
+        timing: Option<TimingMetrics>,
+    ) -> StorageResult<()>;
 }
 
 /// Aggregated exchange counters for a session.

@@ -419,6 +419,46 @@ impl MediaKind {
         Self::Other
     }
 
+    /// Stable database spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Xml => "xml",
+            Self::Html => "html",
+            Self::Css => "css",
+            Self::JavaScript => "js",
+            Self::Text => "text",
+            Self::Image => "image",
+            Self::Font => "font",
+            Self::Form => "form",
+            Self::Binary => "binary",
+            Self::Other => "other",
+        }
+    }
+
+    /// Parses the stable spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns the offending text when it is not a known media kind.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "json" => Ok(Self::Json),
+            "xml" => Ok(Self::Xml),
+            "html" => Ok(Self::Html),
+            "css" => Ok(Self::Css),
+            "js" => Ok(Self::JavaScript),
+            "text" => Ok(Self::Text),
+            "image" => Ok(Self::Image),
+            "font" => Ok(Self::Font),
+            "form" => Ok(Self::Form),
+            "binary" => Ok(Self::Binary),
+            "other" => Ok(Self::Other),
+            other => Err(other.to_owned()),
+        }
+    }
+
     /// Short label for UI badges.
     #[must_use]
     pub fn label(self) -> &'static str {

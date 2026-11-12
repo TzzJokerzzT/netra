@@ -194,10 +194,10 @@ pub struct TimingMetrics {
 }
 
 impl TimingMetrics {
-    /// `true` when at least one phase was measured.
+    /// `true` when at least one phase or the total was measured.
     #[must_use]
     pub fn has_any(&self) -> bool {
-        self.phases().next().is_some()
+        self.total.is_some() || self.phases().next().is_some()
     }
 
     /// Measured phases in waterfall order.
