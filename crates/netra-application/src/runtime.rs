@@ -117,8 +117,22 @@ impl CaptureRuntime {
         let (notification_sender, _) = broadcast::channel(NOTIFICATION_CAPACITY);
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
 
-        let mut provider_tasks = Vec::with_capacity(providers.len());
-        for provider in providers.drain(..) {
+        // A source that cannot start must fail the whole capture before any
+        // task runs: reporting success for a session that never captured
+        // anything would be a lie.
+        let mut started: Vec<Box<dyn CaptureProvider>> = Vec::with_capacity(providers.len());
+        for mut provider in providers.drain(..) {
+            if let Err(error) = provider.start().await {
+                for mut running in started {
+                    let _ = running.stop().await;
+                }
+                return Err(error.into());
+            }
+            started.push(provider);
+        }
+
+        let mut provider_tasks = Vec::with_capacity(started.len());
+        for provider in started {
             provider_tasks.push(spawn_provider(
                 provider,
                 event_sender.clone(),
@@ -225,10 +239,6 @@ fn spawn_provider(
 ) -> JoinHandle<()> {
     let source = provider.source();
     tokio::spawn(async move {
-        if let Err(error) = provider.start().await {
-            tracing::error!(source = %source, error = %error, "capture provider failed to start");
-            return;
-        }
         loop {
             tokio::select! {
                 changed = shutdown.changed() => {
