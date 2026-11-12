@@ -41,13 +41,19 @@ Feature branch: `feat/netra-foundation`. Specification source: `../netra_network
 
 | ID | Specs | Route | Outcome | Commit |
 | --- | --- | --- | --- | --- |
-| T1 | S1, S5 | inline | Workspace `netra` con 7 crates, dominio independiente de infraestructura, ports, CLI Clap, tracing, CI. | `chore: bootstrap netra workspace` |
-| T2 | S5, S6, S8 | inline | Dominio: ids, value objects, entidades, headers ordenados, bodies con estado, redacción de secretos, tests. | `feat(core): domain model and redaction policy` |
-| T3 | S1, S5, S8 | inline | Aplicación: casos de uso sobre ports, filtros, estado de captura, análisis básico. | `feat(application): use cases over ports` |
-| T4 | S3, S4, S6, S8 | inline | Storage SQLite: migraciones versionadas, repositorios, WAL, límites, recuperación. | `feat(storage): sqlite persistence with recovery` |
-| T5 | S2, S4, S6 | worker | TUI Ratatui: layout adaptable, lista, inspector con tabs, filtros, ayuda, confirmación. | `feat(tui): navigable inspector layout` |
-| T6 | S7, S8 | inline | CLI real: `capture`, `sessions list/open/export/delete`, `config`; códigos de salida. | `feat(cli): sessions and capture commands` |
-| T7 | S9 | inline | README, docs/architecture.md, docs/security.md, docs/roadmap.md, ADRs. | `docs: architecture, security and roadmap` |
+| T1 | S1, S5 | inline | Workspace `netra` con 7 crates, CI, fmt/clippy, ODD document. | `chore: bootstrap netra workspace` |
+| T2 | S5, S6, S8 | inline | Dominio: ids, value objects, headers ordenados, bodies con estado, redacción, ports, config. | `feat(core): domain model, ports and redaction policy` |
+| T3 | S5, S8 | inline | Delta de actualizaciones incrementales, kinds estables, totales de timing. | `feat(core): exchange updates, media kinds and timing totals` |
+| T4 | S4, S6, S8 | inline | Procesador de correlación con límites, redacción, huérfanos y contadores de descarte. | `feat(capture): correlate provider events into incremental updates` |
+| T5 | S2, S6 | inline | Motor de análisis: body view, JSON, timing, headers, errores, estadísticas. | `feat(analysis): body, timing, header and error inspection` |
+| T6 | S3, S4, S6, S8 | inline | Storage SQLite: migraciones, WAL, permisos privados, apply incremental, retención, recuperación. | `feat(storage): sqlite persistence with crash recovery` |
+| T7 | S3, S4, S5, S8 | inline | Casos de uso, query service paginado, runtime de captura con canales acotados, export HAR. | `feat(application): use cases and capture runtime` |
+| T8 | S2, S4, S6 | worker (`gentle-ai-worker`) | TUI Ratatui: layout adaptable, lista, inspector de 7 tabs, filtros, ayuda, confirmación. | `feat(tui): navigable inspector with adaptive layout` |
+| T9 | S7, S8, S10 | inline | CLI real: capture/sessions/config, códigos de salida, TUI host, demo etiquetada. | `feat(cli): capture, sessions, export and the TUI host` |
+| T10 | S9 | inline | README, architecture, security, roadmap y 5 ADRs. | `docs: architecture, security model, roadmap and ADRs` |
+
+Naming note: the original plan had 7 tasks; the delta/broadcast split made T3–T7 explicit so every commit is a
+single reviewable work unit.
 
 ## Log
 
@@ -59,6 +65,19 @@ Feature branch: `feat/netra-foundation`. Specification source: `../netra_network
   M2, salvo que el usuario solicite otro orden."
 - **L3 (evidence).** Environment: `rustc 1.99.1` (stable), `cargo 1.99.1`, `chromium`/`brave` in `/usr/bin`,
   `sqlite3` present, Linux x86_64. No prior `netra` checkout: greenfield.
-- **L4 (decision).** Crates are added only when consumed (no CDP/proxy/TLS dependencies in M0–M2); M3/M4 dependency
-  choices (chromiumoxide/hudsucker/rustls/rcgen) are researched and recorded as ADRs when those milestones start.
+- **L4 (decision).** Crates are added only when consumed. CDP, proxy and TLS dependencies (chromiumoxide or
+  alternative, hudsucker or alternative, rustls, rcgen) are deferred to M3/M4 and get their own ADR with a
+  maintenance check at that point.
 - **L5 (decision).** Project root is `/home/alex_buelvas/Projects/Github/netra`, branch `feat/netra-foundation`.
+- **L6 (decision).** `cargo capture --source cdp|proxy` without `--demo` exits with code 3 and names the missing
+  milestone. M3/M4 are not implemented, and S10 forbids pretending otherwise; the demo provider is the only source
+  that exists and it is labelled synthetic in code, docs and CLI help.
+- **L7 (decision).** Structured payloads (JSON/XML) above `limits.max_body_bytes` are persisted as *omitted*
+  instead of truncated: a truncated JSON document cannot be redacted by the JSON field rules, so truncating it
+  would be a credential-leak path. Text and binary payloads are still truncated and flagged. Recorded in ADR 0004
+  and `docs/security.md`.
+- **L8 (evidence, green).** `cargo test --workspace`: 210 tests pass. `cargo clippy --workspace --all-targets`:
+  no warnings. `cargo fmt --all --check`: clean. Release binary smoke-tested with `script -qec`: `capture --demo`
+  persists 5 exchanges (1 failed) and the TUI opens and closes on `q`.
+- **L9 (decision).** The TUI does not start capture: `netra capture` records, `netra` reads. This keeps a single
+  writer per session, lets WAL readers refresh freely, and satisfies S4 without inventing a second source of truth.
