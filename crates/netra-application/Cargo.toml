@@ -9,10 +9,19 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+netra-analysis = { version = "0.1.0", path = "../netra-analysis" }
+netra-capture = { version = "0.1.0", path = "../netra-capture" }
 netra-core.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["sync", "macros", "rt", "time"] }
 tracing = "0.1.44"
+url = "2.5.8"
 uuid = { version = "1.26.1", features = ["v4"] }
+
+[dev-dependencies]
+async-trait = "0.1.92"
+netra-capture = { path = "../netra-capture" }
+netra-storage = { path = "../netra-storage" }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }
