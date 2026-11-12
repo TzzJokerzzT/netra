@@ -4,12 +4,13 @@
 //! provider events into incremental exchange updates, with limits and
 //! redaction applied before anything reaches storage.
 //!
-//! The concrete providers (`cdp`, `proxy`) arrive in milestones M3 and M4; they
-//! implement [`netra_core::ports::CaptureProvider`] and are the only code that
-//! knows their wire protocol.
+//! `cdp` implements the Chrome DevTools Protocol source (milestone M3). The
+//! proxy source (M4) is not implemented yet. Providers are the only code that
+//! knows a wire protocol; everything else speaks [`CaptureEvent`].
 
 #![forbid(unsafe_code)]
 
+pub mod cdp;
 pub mod demo;
 pub mod processor;
 
