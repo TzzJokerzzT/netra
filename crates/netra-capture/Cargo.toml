@@ -9,9 +9,13 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+async-trait = "0.1.92"
 chrono = "0.4.45"
 netra-core.workspace = true
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["sync", "time", "rt"] }
 tracing = "0.1.44"
 uuid = "1.26.1"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt", "time"] }
