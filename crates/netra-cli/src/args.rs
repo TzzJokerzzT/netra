@@ -55,6 +55,10 @@ pub struct CaptureArgs {
     /// The demo provider emits fixed fixtures: it is not real capture.
     #[arg(long)]
     pub demo: bool,
+
+    /// Chrome/Chromium debugging endpoint used by `--source cdp`.
+    #[arg(long, value_name = "HOST:PORT", default_value = "127.0.0.1:9222")]
+    pub cdp_endpoint: String,
 }
 
 /// Arguments of `netra sessions`.

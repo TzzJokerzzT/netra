@@ -8,7 +8,9 @@ use std::{
 use netra_application::{
     AppEvent, ApplicationError, CaptureRuntime, QueryService, SessionService, export::to_har_string,
 };
-use netra_capture::demo::DemoCaptureProvider;
+use netra_capture::{
+    cdp::CdpCaptureProvider, cdp::discovery::CdpEndpoint, demo::DemoCaptureProvider,
+};
 use netra_core::{
     domain::{CaptureSession, ExchangeFilter, SessionId, SourceSelection},
     ports::CaptureProvider,
@@ -240,7 +242,7 @@ pub async fn capture(bootstrap: &Bootstrap, args: &CaptureArgs) -> ExitCode {
     let selection: SourceSelection = args.source.into();
     // Providers are resolved before the session row exists: a capture that
     // cannot start must not leave an empty session behind.
-    let providers = match providers_for(selection, args.demo) {
+    let providers = match providers_for(selection, args.demo, &args.cdp_endpoint) {
         Ok(providers) => providers,
         Err(error) => {
             let code = crate::exit::exit_code_for(&error);
@@ -314,22 +316,28 @@ pub async fn capture(bootstrap: &Bootstrap, args: &CaptureArgs) -> ExitCode {
 
 /// Builds providers for a source selection.
 ///
-/// Only the demo provider exists before milestones M3 (CDP) and M4 (proxy); the
-/// error names that explicitly instead of pretending to capture.
+/// CDP is implemented; the proxy is not, so a selection that includes it fails
+/// with the milestone name instead of pretending to capture.
 fn providers_for(
     selection: SourceSelection,
     demo: bool,
+    cdp_endpoint: &str,
 ) -> Result<Vec<Box<dyn CaptureProvider>>, ApplicationError> {
     if demo {
         return Ok(vec![Box::new(DemoCaptureProvider::new())]);
     }
-    Err(ApplicationError::Unsupported {
-        feature: match selection {
-            SourceSelection::Cdp => "live CDP capture (milestone M3)",
-            SourceSelection::Proxy => "the HTTP/HTTPS proxy (milestone M4)",
-            SourceSelection::Both => "live capture (milestones M3 and M4)",
-        },
-    })
+    match selection {
+        SourceSelection::Cdp => {
+            let endpoint = CdpEndpoint::parse(cdp_endpoint).map_err(ApplicationError::Format)?;
+            Ok(vec![Box::new(CdpCaptureProvider::new(endpoint))])
+        }
+        SourceSelection::Proxy => Err(ApplicationError::Unsupported {
+            feature: "the HTTP/HTTPS proxy (milestone M4)",
+        }),
+        SourceSelection::Both => Err(ApplicationError::Unsupported {
+            feature: "capturing from both sources at once (the proxy arrives in milestone M4)",
+        }),
+    }
 }
 
 /// Loads every exchange of a session for export.

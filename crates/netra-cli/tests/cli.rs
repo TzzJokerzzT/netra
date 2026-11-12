@@ -106,24 +106,49 @@ fn empty_session_list_is_not_an_error() {
         .stdout(predicate::str::contains("no sessions yet"));
 }
 
+/// A port nothing listens on, so a test can never attach to a developer's
+/// running browser.
+fn closed_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
 #[test]
-fn live_capture_is_reported_as_unavailable_and_leaves_no_session() {
+fn cdp_capture_without_a_browser_fails_clearly_and_leaves_no_session() {
     let sandbox = Sandbox::new();
+    let endpoint = format!("127.0.0.1:{}", closed_port());
     sandbox
         .command()
-        .args(["capture", "--source", "cdp"])
+        .args(["capture", "--source", "cdp", "--cdp-endpoint", &endpoint])
         .assert()
-        .code(3)
-        .stderr(
-            predicate::str::contains("not implemented")
-                .or(predicate::str::contains("milestone M3")),
-        );
+        .code(1)
+        .stderr(predicate::str::contains("remote-debugging-port"));
     sandbox
         .command()
         .args(["sessions", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("no sessions yet"));
+}
+
+#[test]
+fn proxy_capture_names_the_missing_milestone() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .command()
+        .args(["capture", "--source", "proxy"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("milestone M4"));
+    sandbox
+        .command()
+        .args(["capture", "--source", "both"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("milestone M4"));
 }
 
 #[test]
