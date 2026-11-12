@@ -296,6 +296,148 @@ fn interrupted_session_is_recovered_on_the_next_run() {
 }
 
 #[test]
+fn a_live_capture_is_not_recovered_by_another_command() {
+    let sandbox = Sandbox::new();
+    let mut child = sandbox
+        .command()
+        .args(["capture", "--demo", "--source", "cdp"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    sandbox
+        .command()
+        .args(["sessions", "list", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("recovered").not());
+    let connection = rusqlite::Connection::open(sandbox.database()).unwrap();
+    let status: String = connection
+        .query_row("SELECT status FROM sessions LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    drop(connection);
+    assert_eq!(status, "capturing", "a live capture must stay capturing");
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+#[test]
+fn wal_and_shm_are_private_while_capture_runs() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let sandbox = Sandbox::new();
+    let mut child = sandbox
+        .command()
+        .args(["capture", "--demo", "--source", "cdp"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    for name in ["netra.db", "netra.db-wal", "netra.db-shm"] {
+        let path = sandbox.data_dir().join(name);
+        if path.exists() {
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{name} must be private, got {mode:o}");
+        }
+    }
+    let directory = fs::metadata(sandbox.data_dir())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(directory, 0o700);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+#[test]
+fn exported_har_files_are_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let sandbox = Sandbox::new();
+    let output = sandbox
+        .command()
+        .args(["capture", "--demo", "--source", "cdp"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prefix = session_prefix(&String::from_utf8(output).unwrap());
+    let export_path = sandbox.directory.path().join("private.har");
+    let _ = fs::remove_file(&export_path);
+    sandbox
+        .command()
+        .args(["sessions", "export", &prefix])
+        .arg("--output")
+        .arg(&export_path)
+        .assert()
+        .success();
+    let mode = fs::metadata(&export_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "an export holds captured credentials");
+}
+
+#[test]
+fn configured_data_dir_is_honoured() {
+    let sandbox = Sandbox::new();
+    let custom = sandbox.directory.path().join("custom-data");
+    let config = sandbox.directory.path().join("netra-config.json");
+    fs::write(&config, format!(r#"{{"data_dir":"{}"}}"#, custom.display())).unwrap();
+    sandbox
+        .command()
+        .arg("--config")
+        .arg(&config)
+        .arg("config")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(custom.display().to_string()));
+    sandbox
+        .command()
+        .arg("--config")
+        .arg(&config)
+        .args(["sessions", "list"])
+        .assert()
+        .success();
+    assert!(
+        custom.join("netra.db").exists(),
+        "the configured data dir must actually be used"
+    );
+}
+
+#[test]
+fn adding_a_redaction_rule_keeps_the_default_carriers() {
+    let sandbox = Sandbox::new();
+    let config = sandbox.directory.path().join("netra-config.json");
+    fs::write(&config, r#"{"redaction":{"header_names":["x-my-token"]}}"#).unwrap();
+    let output = sandbox
+        .command()
+        .arg("--config")
+        .arg(&config)
+        .args(["capture", "--demo", "--source", "cdp"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prefix = session_prefix(&String::from_utf8(output).unwrap());
+    let export_path = sandbox.directory.path().join("rules.har");
+    sandbox
+        .command()
+        .arg("--config")
+        .arg(&config)
+        .args(["sessions", "export", &prefix])
+        .arg("--output")
+        .arg(&export_path)
+        .assert()
+        .success();
+    let har = fs::read_to_string(&export_path).unwrap();
+    assert!(
+        !har.contains("demo-token") && !har.contains("session=demo"),
+        "listing one extra rule must not drop Authorization/Cookie"
+    );
+}
+
+#[test]
 fn export_to_an_unwritable_path_fails_without_panicking() {
     let sandbox = Sandbox::new();
     let output = sandbox

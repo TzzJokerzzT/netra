@@ -169,7 +169,7 @@ pub async fn sessions_export(bootstrap: &Bootstrap, args: &ExportArgs) -> ExitCo
         eprintln!("netra: cannot create {}: {error}", parent.display());
         return ExitCode::Failure;
     }
-    match std::fs::write(&path, text) {
+    match write_private(&path, &text) {
         Ok(()) => {
             println!(
                 "exported {} exchanges of {} to {}",
@@ -398,6 +398,28 @@ async fn resolve(sessions: &SessionService, raw: &str) -> Result<SessionId, Exit
             Err(ExitCode::Failure)
         }
     }
+}
+
+/// Writes a file that contains captured traffic with private permissions.
+///
+/// `std::fs::write` would create the export `0644 & ~umask`; a HAR holds
+/// credentials that redaction could not recognise, so the file is created
+/// `0600` before any byte is written.
+fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(contents.as_bytes())
 }
 
 /// Asks for confirmation on stdin.
