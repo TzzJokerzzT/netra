@@ -1,0 +1,16 @@
+[package]
+name = "netra-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+crossterm = "0.29.0"
+netra-application.workspace = true
+netra-core.workspace = true
+ratatui = "0.29.0"
+tokio = { version = "1.54.1", features = ["sync", "time"] }

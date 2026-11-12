@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/netra-core",
+    "crates/netra-application",
+    "crates/netra-capture",
+    "crates/netra-storage",
+    "crates/netra-analysis",
+    "crates/netra-tui",
+    "crates/netra-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["netra contributors"]
+repository = "https://github.com/netra-tui/netra"
+
+[workspace.dependencies]
+netra-core = { path = "crates/netra-core" }
+netra-application = { path = "crates/netra-application" }
+netra-capture = { path = "crates/netra-capture" }
+netra-storage = { path = "crates/netra-storage" }
+netra-analysis = { path = "crates/netra-analysis" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"

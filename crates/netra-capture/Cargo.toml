@@ -1,0 +1,17 @@
+[package]
+name = "netra-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = "0.4.45"
+netra-core.workspace = true
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["sync", "time", "rt"] }
+tracing = "0.1.44"
+uuid = "1.26.1"
