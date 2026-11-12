@@ -97,4 +97,9 @@ single reviewable work unit.
   `cargo fmt --all --check`: clean.
 - **L12 (provider stop).** The native RDD review of the storage work unit was refused with
   `lens_context_budget_exceeded` (~1900 authored lines with tests): no review authority was created, and the
-  provider requires splitting the candidate into chained smaller commits before reviewing. Pending user decision.
+  provider requires splitting the candidate into chained smaller commits before reviewing.
+- **L13 (user decision, verbatim).** "No lo haga manda el commit con las 1900 lineas." — the storage work unit
+  stays as one commit; it is not split. Consequence, recorded so it is not mistaken for an oversight: that
+  candidate cannot pass the native reviewer budget, so it carries no native review; its risk is covered by the
+  independent verification run (L10/L11) plus 228 tests. Any future native review of storage must start from a
+  new, smaller candidate.
