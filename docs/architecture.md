@@ -51,7 +51,8 @@ Defined in `netra-core::ports`:
 | Port | Implemented by | Notes |
 | --- | --- | --- |
 | `CaptureProvider` | `netra-capture` (demo), M3 CDP, M4 proxy | `start` / `stop` / `next_event` |
-| `SessionRepository` | `netra-storage` | CRUD, counters, interrupted-session recovery |
+| `SessionRepository` | `netra-storage` | CRUD, counters, owner pid, dead-process recovery |
+| `ProcessProbe` | `SystemProcessProbe`, `FixedProcessProbe` | tells a crashed session from a live one |
 | `ExchangeRepository` | `netra-storage` | incremental `apply`, paging, retention, counts |
 | `Clock` | `SystemClock`, test doubles | keeps tests deterministic |
 
@@ -96,7 +97,8 @@ Design properties enforced by the code and its tests:
 - Incremental writes: one `ExchangeUpdate` per processor output, one transaction
   each. Retention (`max_exchanges_per_session`) is swept periodically and the
   deletion is reported.
-- Files are created with mode `0600` inside a `0700` directory.
+- The directory is created `0700`, the database file `0600` before SQLite opens
+  it, and the WAL sidecars are tightened right after the journal mode is set.
 
 ### Guarantees and their limits
 

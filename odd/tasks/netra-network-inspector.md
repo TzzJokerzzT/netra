@@ -81,3 +81,20 @@ single reviewable work unit.
   persists 5 exchanges (1 failed) and the TUI opens and closes on `q`.
 - **L9 (decision).** The TUI does not start capture: `netra capture` records, `netra` reads. This keeps a single
   writer per session, lets WAL readers refresh freely, and satisfies S4 without inventing a second source of truth.
+- **L10 (independent verification, findings).** `gentle-ai-verify` confirmed both high-risk claims for the
+  demo path (no credential reaches the database, the WAL or the HAR; incremental writes survive `kill -9` with
+  `integrity_check = ok` and no orphan rows) and refuted five defects. All five were fixed and pinned with tests:
+  `D1` unparsable-URL redaction bypass (`redact_url` now masks query values textually), `D2` configured redaction
+  rules replaced the built-in carriers (`merged_with_defaults`), `D3` startup recovery stopped a *live* session
+  (ownership by pid: migration `M2_OWNER_PID`, `SessionRepository::set_owner`, probe-aware recovery),
+  `D4` permissions applied after creation (`0600`/`0700` applied at creation, sidecars tightened),
+  `D5` configured `data_dir` was silently ignored (honoured, relative paths resolved against the config file,
+  never written back), `D6` HAR exports were world-readable (`0600` via `OpenOptions::mode`).
+  Advisory limits kept and documented: non-JSON bodies, custom header names, malformed JSON, and truncation of
+  non-structured payloads.
+- **L11 (evidence, green after corrections).** `cargo test --workspace`: **228 tests pass** (was 210; the
+  verifier's probes became regression tests). `cargo clippy --workspace --all-targets`: no warnings.
+  `cargo fmt --all --check`: clean.
+- **L12 (provider stop).** The native RDD review of the storage work unit was refused with
+  `lens_context_budget_exceeded` (~1900 authored lines with tests): no review authority was created, and the
+  provider requires splitting the candidate into chained smaller commits before reviewing. Pending user decision.

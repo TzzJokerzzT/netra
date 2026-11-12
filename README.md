@@ -85,7 +85,10 @@ records: capture data lives in SQLite, not in the UI.
 - Config: `$XDG_DATA_HOME/netra/config.json` (default
   `~/.local/share/netra/config.json`).
 - Database: `$XDG_DATA_HOME/netra/netra.db`, created with mode `0600` inside a
-  `0700` directory.
+  `0700` directory; the WAL sidecars are tightened to `0600` as soon as the
+  journal mode is enabled.
+- A `config.json` may set `data_dir`; it is honoured (relative paths resolve
+  against the configuration file) and never written back by the tool.
 - Exports: `$XDG_DATA_HOME/netra/exports/`.
 
 ## What is persisted, and what is not
