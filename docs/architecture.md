@@ -148,7 +148,33 @@ Known protocol limits, documented rather than hidden:
   `waitForDebuggerOnStart` closes that window for normal navigation.
 - WebSockets are not inspected yet (milestone M6).
 
-## Adding a capture provider (M4)
+## Proxy source (M4, implemented)
+
+`netra-capture/proxy` is a hand-written HTTP/1.1 proxy (ADR 0007) with four
+parts:
+
+- `message` parses request/status lines, ordered headers, `Content-Length` and
+  chunked bodies, with a 64 KiB head limit.
+- `ca` owns the local authority: `netra ca init` creates it (key `0600`), leaves
+  are minted per host and cached, and the rustls resolver signs during the
+  handshake.
+- `mod` runs the listener: a semaphore bounds concurrent connections, each
+  connection handles one exchange, and every exchange becomes the same
+  `CaptureEvent` stream the CDP source produces.
+- CONNECT: with `proxy.intercept_tls=false` the bytes are relayed and reported as
+  a tunnel; with it enabled the proxy terminates TLS with a per-host leaf and
+  captures the inner HTTP.
+
+Boundaries that are deliberate, not accidental:
+
+- HTTP/2 is not spoken to upstreams; intercepted sessions use HTTP/1.1.
+- One exchange per connection: `Connection: close` after every response.
+- Bodies above `proxy.max_body_bytes` close the connection instead of being
+  buffered or truncated.
+- CONNECT tunnels are opaque: the inspector shows a tunnel, never invented
+  inner traffic.
+
+## Adding a capture provider (M5+)
 
 Implement `CaptureProvider`:
 
@@ -158,8 +184,7 @@ Implement `CaptureProvider`:
 2. Use a stable provider-local request id: it is the correlation key.
 3. Leave limits, redaction and persistence to the pipeline — do not store or
    log payloads in the adapter.
-4. Register the provider in `netra-cli`'s `providers_for` and delete the
-   corresponding "not implemented" arm.
+4. Register the provider in `netra-cli`'s `providers_for`.
 
 The runtime calls `provider.start()` before spawning any task, so a source that
 cannot start fails the capture immediately instead of producing a session that

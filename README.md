@@ -18,7 +18,7 @@ the CLI says so instead of pretending.
 | M1 | Ratatui/crossterm TUI: layout, list, inspector tabs, filters, help | done |
 | M2 | SQLite: migrations, incremental persistence, recovery, limits | done |
 | M3 | CDP capture (Chrome/Chromium) | done |
-| M4 | HTTP/HTTPS proxy with local CA | not started |
+| M4 | HTTP/HTTPS proxy with local CA | done |
 | M5 | Analysis depth (waterfall UI, search UX) | partially: analysis engine done |
 | M6 | Replay, HAR import, compare, WebSockets, stats UI | not started |
 | M7 | Hardening and release | not started |
@@ -80,6 +80,27 @@ records: capture data lives in SQLite, not in the UI.
 | 2 | usage error (clap) |
 | 3 | feature not available yet |
 | 4 | requested session does not exist |
+
+### Proxy capture
+
+```bash
+netra capture --source proxy --proxy-port 8080
+# point a browser or a tool at 127.0.0.1:8080
+```
+
+Plain HTTP is captured immediately. HTTPS is captured either as an opaque CONNECT
+tunnel (default) or decrypted when interception is enabled:
+
+```bash
+netra ca init                      # create the local authority once
+netra ca export --output netra-ca.pem
+# import that certificate in your browser/OS trust store, then:
+# set "intercept_tls": true under "proxy" in config.json
+netra ca show                      # paths and the certificate's SHA-256
+```
+
+`netra` never installs certificates. Remove the trusted entry to undo
+interception.
 
 ### Live CDP capture
 

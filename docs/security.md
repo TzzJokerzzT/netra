@@ -97,24 +97,26 @@ reach it can drive the browser. `netra` does not open it — enabling
 browser profile that is closed when the session ends. The adapter never asks for
 `--remote-allow-origins=*`.
 
-## Proxy (milestone M4, not implemented)
+## Proxy and local authority (implemented)
 
-The contract the implementation must honour:
-
-- Listen on `127.0.0.1` by default; binding elsewhere requires an explicit
-  configuration change.
-- Never accept unauthenticated external connections: an open proxy is a data
-  exfiltration path.
-- Limit concurrent connections (`proxy.max_connections`), header size and body
-  size, and set timeouts.
-- Support CONNECT tunnelling **without** decryption, and make TLS interception a
-  deliberate per-session action.
-- A local certificate authority is generated only on explicit user action, its
-  private key is written with `0600`, and nothing is installed into the system
-  trust store automatically. Trust and removal instructions ship with the
-  feature, not before it.
-- Certificate pinning, QUIC/HTTP-3 and clients that ignore proxy settings are
-  documented as unsupported rather than worked around.
+- Listens on `127.0.0.1` by default. Binding anything else is refused unless
+  `proxy.allow_remote` is `true`, and the adapter enforces that itself, not only
+  the configuration validator.
+- CONNECT without interception is a byte tunnel: it is reported as a tunnel and
+  never inspected.
+- TLS interception is opt-in (`proxy.intercept_tls`) **and** requires a CA
+  created by `netra ca init`. Without material, capture fails closed and says so.
+- The CA private key is written `0600` inside a `0700` directory, only once;
+  `netra ca init` never replaces an existing authority. `netra ca show` prints the
+  PEM's SHA-256 so it can be compared before trusting it, and `netra ca export`
+  produces the file to import. Nothing is installed anywhere by `netra`.
+- Upstream TLS is verified against the Mozilla roots plus `proxy.extra_trust_roots`.
+  Certificate validation is never disabled, not even for testing.
+- Limits: `proxy.max_connections` (64), `proxy.max_body_bytes` (8 MiB; larger
+  bodies close the connection instead of being buffered), 64 KiB head limit, and
+  `proxy.timeout_secs` (30) per step.
+- Unsupported by design, and documented rather than worked around: certificate
+  pinning, QUIC/HTTP-3, HTTP/2 upstreams, and clients that ignore proxy settings.
 
 ## Replay and SSRF (milestone M6, not implemented)
 

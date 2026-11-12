@@ -37,13 +37,16 @@ Deliberate gaps, each documented in `docs/architecture.md`:
 - The adapter attaches to an already-running browser; it never launches one.
   Start Chrome with `--remote-debugging-port=9222`.
 
-## M4 — HTTP/HTTPS proxy — not started
+## M4 — HTTP/HTTPS proxy — done
 
-Needs: a forward proxy with CONNECT (evaluate `hudsucker` and alternatives),
-local certificate authority generation with `rcgen`/`rustls`, per-host leaf
-certificates, private key permissions, tunnel-without-decryption mode,
-connection/body/timeout limits, and tests against local fixture servers
-including a TLS one.
+Implemented: HTTP/1.1 forward proxy with capture, CONNECT tunnelling without
+decryption, TLS interception with a local authority and per-host leaves,
+`netra ca init|export|show`, loopback-only binding with an explicit opt-in,
+connection/body/head/timeout limits, and integration tests against local plain
+and TLS origins. Decision recorded in ADR 0007.
+
+Deliberate gaps: HTTP/2 upstreams, persistent connections, WebSocket upgrade
+inside interception, and certificate-pinning clients.
 
 ## M5 — Analysis depth — partially done
 
