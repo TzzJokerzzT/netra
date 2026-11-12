@@ -673,6 +673,22 @@ mod tests {
     }
 
     #[test]
+    fn unparsable_url_query_values_are_masked_before_storage() {
+        let mut processor = processor();
+        let updates = processor.apply(CaptureEvent::RequestStarted {
+            key: key("1"),
+            request: request("https://api.test:99999/x?token=supersecret&page=2"),
+        });
+        let exchange = discovered(&updates[0]);
+        assert!(
+            !exchange.request.url.as_str().contains("supersecret"),
+            "an unparsable URL must not bypass query redaction: {}",
+            exchange.request.url.as_str()
+        );
+        assert!(exchange.request.url.as_str().contains("page=2"));
+    }
+
+    #[test]
     fn json_payload_secrets_are_masked_in_place() {
         let mut processor = roomy_processor();
         let mut payload = Body::captured(

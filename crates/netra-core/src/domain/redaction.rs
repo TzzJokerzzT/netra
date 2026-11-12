@@ -109,6 +109,14 @@ fn default_true() -> bool {
     true
 }
 
+fn extend_case_insensitive(target: &mut Vec<String>, defaults: &[&str]) {
+    for default in defaults {
+        if !target.iter().any(|rule| rule.eq_ignore_ascii_case(default)) {
+            target.push((*default).to_owned());
+        }
+    }
+}
+
 impl Default for RedactionPolicy {
     fn default() -> Self {
         Self {
@@ -157,6 +165,19 @@ impl RedactionPolicy {
         }
     }
 
+    /// Extends every rule list with the built-in credential carriers.
+    ///
+    /// Configuration adds rules; it does not silently drop the defaults that
+    /// `docs/security.md` promises. Use [`RedactionPolicy::permissive`] for an
+    /// explicit opt-out.
+    #[must_use]
+    pub fn merged_with_defaults(mut self) -> Self {
+        extend_case_insensitive(&mut self.header_names, DEFAULT_SENSITIVE_HEADERS);
+        extend_case_insensitive(&mut self.query_params, DEFAULT_SENSITIVE_QUERY_PARAMS);
+        extend_case_insensitive(&mut self.json_fields, DEFAULT_SENSITIVE_JSON_FIELDS);
+        self
+    }
+
     /// `true` when the header is configured as sensitive.
     #[must_use]
     pub fn is_sensitive_header(&self, name: &str) -> bool {
@@ -181,10 +202,15 @@ impl RedactionPolicy {
     }
 
     /// Masks configured query parameter values in a URL.
+    ///
+    /// A captured URL is not always parseable (`https://host:99999/x?token=...`,
+    /// `data:`, malformed redirects). Falling back to the raw text is not
+    /// acceptable: the parse failure would then be a redaction bypass. The
+    /// query string is therefore also masked textually.
     #[must_use]
     pub fn redact_url(&self, url: &RequestUrl, report: &mut RedactionReport) -> RequestUrl {
         let Some(parsed) = url.parsed() else {
-            return url.clone();
+            return self.redact_url_textually(url, report);
         };
         if parsed.query().is_none() {
             return url.clone();
@@ -193,11 +219,7 @@ impl RedactionPolicy {
         let pairs: Vec<(String, String)> = parsed
             .query_pairs()
             .map(|(name, value)| {
-                if self
-                    .query_params
-                    .iter()
-                    .any(|candidate| candidate.eq_ignore_ascii_case(&name))
-                {
+                if self.is_sensitive_query_param(&name) {
                     changed = true;
                     report.query_values += 1;
                     (name.into_owned(), self.replacement.clone())
@@ -218,6 +240,48 @@ impl RedactionPolicy {
             }
         }
         RequestUrl::new(rebuilt.to_string())
+    }
+
+    /// Masks sensitive query values in a URL that no parser accepted.
+    fn redact_url_textually(&self, url: &RequestUrl, report: &mut RedactionReport) -> RequestUrl {
+        let raw = url.as_str();
+        let Some((head, query)) = raw.split_once('?') else {
+            return url.clone();
+        };
+        let (query, fragment) = match query.split_once('#') {
+            Some((query, fragment)) => (query, Some(fragment)),
+            None => (query, None),
+        };
+        let mut rebuilt = String::with_capacity(raw.len());
+        rebuilt.push_str(head);
+        rebuilt.push('?');
+        for (index, pair) in query.split('&').enumerate() {
+            if index > 0 {
+                rebuilt.push('&');
+            }
+            match pair.split_once('=') {
+                Some((name, _value)) if self.is_sensitive_query_param(name) => {
+                    rebuilt.push_str(name);
+                    rebuilt.push('=');
+                    rebuilt.push_str(&self.replacement);
+                    report.query_values += 1;
+                }
+                _ => rebuilt.push_str(pair),
+            }
+        }
+        if let Some(fragment) = fragment {
+            rebuilt.push('#');
+            rebuilt.push_str(fragment);
+        }
+        RequestUrl::new(rebuilt)
+    }
+
+    /// `true` when the query parameter is configured as sensitive.
+    #[must_use]
+    pub fn is_sensitive_query_param(&self, name: &str) -> bool {
+        self.query_params
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(name))
     }
 
     /// Recursively masks configured field names in a JSON document.
@@ -351,6 +415,23 @@ mod tests {
     }
 
     #[test]
+    fn configured_rules_extend_instead_of_replacing_defaults() {
+        // Model a config file that lists only one rule.
+        let merged = RedactionPolicy {
+            header_names: vec!["x-my-token".to_owned()],
+            query_params: Vec::new(),
+            json_fields: Vec::new(),
+            ..RedactionPolicy::default()
+        }
+        .merged_with_defaults();
+        assert!(merged.is_sensitive_header("x-my-token"));
+        assert!(merged.is_sensitive_header("Authorization"));
+        assert!(merged.is_sensitive_query_param("token"));
+        let mut headers = HttpHeaders::from_pairs([("Authorization", "Bearer x")]);
+        assert_eq!(merged.redact_headers(&mut headers), 1);
+    }
+
+    #[test]
     fn default_policy_masks_the_documented_headers() {
         let policy = RedactionPolicy::default();
         for name in [
@@ -395,6 +476,35 @@ mod tests {
         );
         assert!(url.as_str().contains("page=2"));
         assert_eq!(report.query_values, 1);
+    }
+
+    #[test]
+    fn unparsable_urls_are_masked_textually() {
+        let policy = RedactionPolicy::default();
+        let mut report = RedactionReport::default();
+        // Port out of range: `Url::parse` refuses it, so the parser branch cannot run.
+        let url = policy.redact_url(
+            &RequestUrl::new("https://api.test:99999/x?token=supersecret&page=2#top"),
+            &mut report,
+        );
+        assert!(!url.as_str().contains("supersecret"), "got {url}");
+        assert!(
+            url.as_str()
+                .contains(&format!("token={}", REDACTION_MARKER))
+        );
+        assert!(url.as_str().contains("page=2"));
+        assert!(url.as_str().ends_with("#top"));
+        assert_eq!(report.query_values, 1);
+    }
+
+    #[test]
+    fn unparsable_urls_without_sensitive_params_are_untouched() {
+        let policy = RedactionPolicy::default();
+        let mut report = RedactionReport::default();
+        let raw = "https://api.test:99999/x?page=2&sort=asc";
+        let url = policy.redact_url(&RequestUrl::new(raw), &mut report);
+        assert_eq!(url.as_str(), raw);
+        assert!(report.is_empty());
     }
 
     #[test]
