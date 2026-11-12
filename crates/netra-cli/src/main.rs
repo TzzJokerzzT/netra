@@ -29,7 +29,8 @@ async fn main() -> std::process::ExitCode {
     // Crash recovery happens before any command so the session list never shows
     // a session as live when this process is the only one that could update it.
     let sessions = SessionService::new(bootstrap.context.clone());
-    match sessions.recover_interrupted().await {
+    let probe = netra_core::ports::SystemProcessProbe;
+    match sessions.recover_interrupted(&probe).await {
         Ok(recovered) if !recovered.is_empty() => eprintln!(
             "netra: recovered {} interrupted session(s); their recorded exchanges are intact",
             recovered.len()

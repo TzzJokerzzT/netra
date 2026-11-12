@@ -5,7 +5,7 @@ use netra_core::{
         CaptureSession, SessionId, SessionStatus, SessionSummary, SourceSelection, Timestamp,
     },
     error::StorageError,
-    ports::ExchangeCounts,
+    ports::{ExchangeCounts, ProcessProbe},
 };
 
 use crate::{ApplicationError, ApplicationResult, context::AppContext};
@@ -176,18 +176,22 @@ impl SessionService {
         Ok(self.context.exchanges.counts(id).await?)
     }
 
-    /// Marks every session left active by a previous process as stopped.
+    /// Marks every session abandoned by a dead process as stopped.
     ///
-    /// Returns the recovered identifiers so callers can tell the user.
+    /// A session whose recorded owner process is still running is left alone:
+    /// another `netra` may be capturing into it right now.
     ///
     /// # Errors
     ///
     /// Returns [`ApplicationError::Storage`] on write failure.
-    pub async fn recover_interrupted(&self) -> ApplicationResult<Vec<SessionId>> {
+    pub async fn recover_interrupted(
+        &self,
+        probe: &dyn ProcessProbe,
+    ) -> ApplicationResult<Vec<SessionId>> {
         Ok(self
             .context
             .sessions
-            .recover_interrupted(self.context.clock.now())
+            .recover_interrupted(self.context.clock.now(), probe)
             .await?)
     }
 
@@ -304,7 +308,10 @@ mod tests {
         let second = service.create("two", SourceSelection::Proxy).await.unwrap();
         let stopped = service.stop(second.id).await.unwrap();
 
-        let recovered = service.recover_interrupted().await.unwrap();
+        let recovered = service
+            .recover_interrupted(&netra_core::ports::FixedProcessProbe::default())
+            .await
+            .unwrap();
         assert_eq!(recovered, vec![first.id]);
         assert_eq!(
             service.get(first.id).await.unwrap().status,
@@ -314,6 +321,12 @@ mod tests {
             service.get(stopped.id).await.unwrap().status,
             SessionStatus::Stopped
         );
-        assert!(service.recover_interrupted().await.unwrap().is_empty());
+        assert!(
+            service
+                .recover_interrupted(&netra_core::ports::FixedProcessProbe::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

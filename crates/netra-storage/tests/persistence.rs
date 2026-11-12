@@ -432,7 +432,10 @@ async fn interrupted_sessions_are_recovered_with_a_finish_instant() {
     };
 
     let recovered = store
-        .recover_interrupted(Timestamp::from_unix_millis(9_000))
+        .recover_interrupted(
+            Timestamp::from_unix_millis(9_000),
+            &netra_core::ports::FixedProcessProbe::default(),
+        )
         .await
         .unwrap();
     assert!(recovered.contains(&active.id));
@@ -449,11 +452,67 @@ async fn interrupted_sessions_are_recovered_with_a_finish_instant() {
     }
     assert!(
         store
-            .recover_interrupted(Timestamp::now())
+            .recover_interrupted(
+                Timestamp::now(),
+                &netra_core::ports::FixedProcessProbe::default()
+            )
             .await
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn a_session_owned_by_a_live_process_is_not_recovered() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let live =
+        CaptureSession::new("live", SourceSelection::Cdp, Timestamp::from_unix_millis(1)).unwrap();
+    let crashed = CaptureSession::new(
+        "crashed",
+        SourceSelection::Cdp,
+        Timestamp::from_unix_millis(2),
+    )
+    .unwrap();
+    store.create(&live).await.unwrap();
+    store.create(&crashed).await.unwrap();
+    store.set_owner(live.id, 4_242).await.unwrap();
+    store.set_owner(crashed.id, 9_999).await.unwrap();
+
+    let probe = netra_core::ports::FixedProcessProbe::new([4_242]);
+    let recovered = store
+        .recover_interrupted(Timestamp::from_unix_millis(10_000), &probe)
+        .await
+        .unwrap();
+    assert_eq!(recovered, vec![crashed.id]);
+    assert_eq!(
+        load_session(&store, live.id).await.unwrap().status,
+        SessionStatus::Capturing,
+        "a session being captured right now must stay live"
+    );
+    assert_eq!(
+        load_session(&store, crashed.id).await.unwrap().status,
+        SessionStatus::Stopped
+    );
+}
+
+#[tokio::test]
+async fn sessions_without_an_owner_are_recovered() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let session = CaptureSession::new(
+        "legacy",
+        SourceSelection::Cdp,
+        Timestamp::from_unix_millis(1),
+    )
+    .unwrap();
+    store.create(&session).await.unwrap();
+    let recovered = store
+        .recover_interrupted(
+            Timestamp::from_unix_millis(5),
+            &netra_core::ports::FixedProcessProbe::new([1, 2, 3]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered, vec![session.id]);
 }
 
 #[tokio::test]

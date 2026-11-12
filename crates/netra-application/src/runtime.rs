@@ -279,6 +279,15 @@ fn spawn_consumer(
         if let Err(error) = context.sessions.update(&session).await {
             tracing::error!(error = %error, "cannot mark session active");
         }
+        // Record the owning process so another `netra` command never mistakes
+        // this live capture for a crashed one.
+        if let Err(error) = context
+            .sessions
+            .set_owner(session_id, std::process::id())
+            .await
+        {
+            tracing::error!(error = %error, "cannot record session owner");
+        }
 
         loop {
             tokio::select! {

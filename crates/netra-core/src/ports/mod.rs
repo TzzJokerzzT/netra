@@ -85,15 +85,30 @@ pub trait SessionRepository: Send + Sync {
     /// Returns [`crate::error::StorageError::NotFound`] when the session is missing.
     async fn delete(&self, id: SessionId) -> StorageResult<()>;
 
-    /// Marks every still-active session as stopped at `at`.
+    /// Records which process is capturing a session.
     ///
-    /// Called once during startup: a session left in `capturing`/`paused` can
-    /// only mean the previous process ended without a graceful stop.
+    /// Recovery uses this to tell a crashed session from one another `netra`
+    /// process is capturing right now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::StorageError::NotFound`] when the session is missing.
+    async fn set_owner(&self, id: SessionId, pid: u32) -> StorageResult<()>;
+
+    /// Marks every session abandoned by a dead process as stopped at `at`.
+    ///
+    /// A session is abandoned, never merely "active": when `owner_pid` names a
+    /// live process the session is left untouched, because that process is
+    /// still writing to it.
     ///
     /// # Errors
     ///
     /// Returns [`crate::error::StorageError::Backend`] on write failure.
-    async fn recover_interrupted(&self, at: Timestamp) -> StorageResult<Vec<SessionId>>;
+    async fn recover_interrupted(
+        &self,
+        at: Timestamp,
+        probe: &dyn ProcessProbe,
+    ) -> StorageResult<Vec<SessionId>>;
 }
 
 /// Persistence of exchanges, written incrementally while capture runs.
@@ -203,6 +218,56 @@ pub struct ExchangeCounts {
     pub errors: u64,
     /// Exchanges still waiting for a response.
     pub pending: u64,
+}
+
+/// Answers whether a process is still running.
+pub trait ProcessProbe: Send + Sync {
+    /// `true` when the process exists.
+    fn is_alive(&self, pid: u32) -> bool;
+}
+
+/// Production probe: on Linux a live process owns an entry in `/proc`.
+///
+/// On other platforms the probe reports every process as gone, which keeps the
+/// recovery behaviour conservative (a session is recovered on the next start)
+/// and is documented in `docs/architecture.md`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemProcessProbe;
+
+impl ProcessProbe for SystemProcessProbe {
+    fn is_alive(&self, pid: u32) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            std::path::Path::new(&format!("/proc/{pid}")).exists()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = pid;
+            false
+        }
+    }
+}
+
+/// Probe that reports a fixed set of processes as alive, for tests.
+#[derive(Debug, Clone, Default)]
+pub struct FixedProcessProbe {
+    alive: std::collections::BTreeSet<u32>,
+}
+
+impl FixedProcessProbe {
+    /// Builds a probe from the pids that must look alive.
+    #[must_use]
+    pub fn new(alive: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            alive: alive.into_iter().collect(),
+        }
+    }
+}
+
+impl ProcessProbe for FixedProcessProbe {
+    fn is_alive(&self, pid: u32) -> bool {
+        self.alive.contains(&pid)
+    }
 }
 
 /// Wall-clock abstraction so tests are deterministic.

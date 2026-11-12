@@ -7,7 +7,7 @@
 use rusqlite::{Connection, Transaction};
 
 /// Ordered migrations. Never edit or reorder an applied entry: add a new one.
-pub const MIGRATIONS: &[&str] = &[M1_INITIAL_SCHEMA];
+pub const MIGRATIONS: &[&str] = &[M1_INITIAL_SCHEMA, M2_OWNER_PID];
 
 /// Version 1: sessions, exchanges, headers, bodies and timings.
 const M1_INITIAL_SCHEMA: &str = r"
@@ -90,6 +90,12 @@ CREATE TABLE timings (
 );
 ";
 
+/// Version 2: remember which process owns a live session, so recovery never
+/// steals a session that another `netra` process is actively capturing.
+const M2_OWNER_PID: &str = r"
+ALTER TABLE sessions ADD COLUMN owner_pid INTEGER;
+";
+
 /// Applies every migration the database is missing.
 ///
 /// # Errors
@@ -155,6 +161,32 @@ mod tests {
         assert!(tables.contains(&"headers".to_owned()));
         assert!(tables.contains(&"bodies".to_owned()));
         assert!(tables.contains(&"timings".to_owned()));
+    }
+
+    #[test]
+    fn owner_pid_column_exists_and_is_nullable() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        apply(&mut connection).unwrap();
+        let columns: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'owner_pid'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 1);
+        connection
+            .execute(
+                "INSERT INTO sessions (id, name, status, source, created_at) VALUES ('s', 'n', 'capturing', 'cdp', 0)",
+                [],
+            )
+            .unwrap();
+        let pid: Option<i64> = connection
+            .query_row("SELECT owner_pid FROM sessions WHERE id = 's'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(pid, None);
     }
 
     #[test]

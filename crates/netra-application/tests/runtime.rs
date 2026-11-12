@@ -112,7 +112,10 @@ async fn dropping_the_runtime_leaves_the_session_recoverable() {
         SessionStatus::Capturing,
         "an aborted runtime must not look gracefully stopped"
     );
-    let recovered = sessions.recover_interrupted().await.unwrap();
+    let recovered = sessions
+        .recover_interrupted(&netra_core::ports::FixedProcessProbe::default())
+        .await
+        .unwrap();
     assert_eq!(recovered, vec![session.id]);
     assert_eq!(
         sessions.get(session.id).await.unwrap().status,

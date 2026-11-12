@@ -55,11 +55,15 @@ impl SqliteStore {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                StorageError::Backend(format!("cannot create {}: {error}", parent.display()))
-            })?;
+            create_private_directory(parent)?;
+            // A pre-existing data directory is tightened too: it now holds a
+            // database of captured credentials.
             restrict_directory(parent);
         }
+        // The file is created with its final mode: a `chmod` after
+        // `Connection::open` would leave a window in which another local
+        // process could open the database with the process umask.
+        precreate_private_file(&path)?;
         let mut connection = Connection::open(&path).map_err(|error| {
             StorageError::Backend(format!("cannot open {}: {error}", path.display()))
         })?;
@@ -68,10 +72,12 @@ impl SqliteStore {
             .map_err(|error| StorageError::Backend(format!("migrations failed: {error}")))?;
         drop(connection);
         restrict_file(&path);
+        restrict_sidecars(&path);
         let connection = Connection::open(&path).map_err(|error| {
             StorageError::Backend(format!("cannot reopen {}: {error}", path.display()))
         })?;
         configure(&connection)?;
+        restrict_sidecars(&path);
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             path,
@@ -150,6 +156,60 @@ fn configure(connection: &Connection) -> StorageResult<()> {
     Ok(())
 }
 
+/// Creates `path` (and missing parents) with `0700` on Unix.
+fn create_private_directory(path: &Path) -> StorageResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path).map_err(|error| {
+            StorageError::Backend(format!("cannot create {}: {error}", path.display()))
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path).map_err(|error| {
+            StorageError::Backend(format!("cannot create {}: {error}", path.display()))
+        })
+    }
+}
+
+/// Creates the database file with `0600` before SQLite touches it.
+fn precreate_private_file(path: &Path) -> StorageResult<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    let result = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map(|_| ())
+    };
+    #[cfg(not(unix))]
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ());
+    result.map_err(|error| {
+        StorageError::Backend(format!("cannot create {}: {error}", path.display()))
+    })
+}
+
+/// Tightens the WAL sidecars SQLite creates with the process umask.
+fn restrict_sidecars(path: &Path) {
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        restrict_file(Path::new(&sidecar));
+    }
+}
+
 #[cfg(unix)]
 fn restrict_file(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
@@ -217,6 +277,31 @@ mod tests {
         let _store = SqliteStore::open(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecars_are_private_after_open() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("netra.db");
+        let store = SqliteStore::open(&path).unwrap();
+        // Force a write so the WAL sidecar exists, then re-tighten and check.
+        drop(store);
+        let _store = SqliteStore::open(&path).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = dir.path().join(format!("netra.db{suffix}"));
+            if candidate.exists() {
+                let mode = std::fs::metadata(&candidate).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{} must be private", candidate.display());
+            }
+        }
+        // The directory holding the database is tightened, even when it
+        // already existed with a looser mode (a pre-existing data directory).
+        let nested = dir.path().join("nested");
+        drop(SqliteStore::open(nested.join("netra.db")).unwrap());
+        let mode = std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]

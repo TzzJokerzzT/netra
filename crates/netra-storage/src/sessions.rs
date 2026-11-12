@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use netra_core::{
     domain::{CaptureSession, SessionId, SessionSummary, Timestamp},
     error::{StorageError, StorageResult},
-    ports::{ExchangeCounts, SessionRepository},
+    ports::{ExchangeCounts, ProcessProbe, SessionRepository},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -230,38 +230,83 @@ impl SessionRepository for SqliteStore {
         .await
     }
 
-    async fn recover_interrupted(&self, at: Timestamp) -> StorageResult<Vec<SessionId>> {
+    async fn set_owner(&self, id: SessionId, pid: u32) -> StorageResult<()> {
         self.with_connection(move |connection| {
-            let mut statement = connection
-                .prepare("SELECT id FROM sessions WHERE status IN ('capturing', 'paused') ORDER BY created_at")
-                .map_err(|error| StorageError::Backend(error.to_string()))?;
-            let ids: Vec<String> = statement
-                .query_map([], |row| row.get(0))
-                .map_err(|error| StorageError::Backend(error.to_string()))?
-                .map(|row| row.map_err(|error| StorageError::Backend(error.to_string())))
-                .collect::<StorageResult<Vec<String>>>()?;
-            drop(statement);
-            if ids.is_empty() {
-                return Ok(Vec::new());
+            let changed = connection
+                .execute(
+                    "UPDATE sessions SET owner_pid = ?2 WHERE id = ?1",
+                    params![id.to_string(), i64::from(pid)],
+                )
+                .map_err(|error| crate::map_error(error, "set session owner"))?;
+            if changed == 0 {
+                return Err(StorageError::NotFound(format!("session {id}")));
             }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn recover_interrupted(
+        &self,
+        at: Timestamp,
+        probe: &dyn ProcessProbe,
+    ) -> StorageResult<Vec<SessionId>> {
+        // A closure cannot capture `&dyn ProcessProbe` across `spawn_blocking`,
+        // so the liveness answers are collected first and the query runs after.
+        let candidates = self
+            .with_connection(|connection| {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT id, owner_pid FROM sessions
+                         WHERE status IN ('capturing', 'paused') ORDER BY created_at",
+                    )
+                    .map_err(|error| StorageError::Backend(error.to_string()))?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+                    })
+                    .map_err(|error| StorageError::Backend(error.to_string()))?;
+                rows.map(|row| row.map_err(|error| StorageError::Backend(error.to_string())))
+                    .collect::<StorageResult<Vec<(String, Option<i64>)>>>()
+            })
+            .await?;
+
+        let abandoned: Vec<String> = candidates
+            .into_iter()
+            .filter(|(_, owner)| match owner {
+                Some(pid) => u32::try_from(*pid).map_or(true, |pid| !probe.is_alive(pid)),
+                None => true,
+            })
+            .map(|(id, _)| id)
+            .collect();
+        if abandoned.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.with_connection(move |connection| {
             let transaction = connection
                 .transaction()
                 .map_err(|error| StorageError::Backend(error.to_string()))?;
-            transaction
-                .execute(
-                    "UPDATE sessions SET status = 'stopped', finished_at = COALESCE(finished_at, ?1)
-                     WHERE status IN ('capturing', 'paused')",
-                    params![millis(at)],
-                )
-                .map_err(|error| crate::map_error(error, "recover sessions"))?;
+            let mut recovered = Vec::with_capacity(abandoned.len());
+            for id in &abandoned {
+                transaction
+                    .execute(
+                        "UPDATE sessions
+                         SET status = 'stopped', finished_at = COALESCE(finished_at, ?2),
+                             owner_pid = NULL
+                         WHERE id = ?1",
+                        params![id, millis(at)],
+                    )
+                    .map_err(|error| crate::map_error(error, "recover session"))?;
+                recovered.push(
+                    SessionId::parse(id)
+                        .map_err(|error| StorageError::Decode(error.to_string()))?,
+                );
+            }
             transaction
                 .commit()
                 .map_err(|error| StorageError::Backend(error.to_string()))?;
-            ids.iter()
-                .map(|id| {
-                    SessionId::parse(id).map_err(|error| StorageError::Decode(error.to_string()))
-                })
-                .collect()
+            Ok(recovered)
         })
         .await
     }
