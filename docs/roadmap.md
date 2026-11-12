@@ -20,19 +20,22 @@ SQLite with WAL, foreign keys, versioned migrations, private permissions,
 incremental persistence per processor update, paging and filtering in SQL,
 retention, crash recovery of sessions left active, restart tests.
 
-## M3 — CDP capture — not started
+## M3 — CDP capture — done
 
-Needs: a maintained CDP client (evaluate `chromiumoxide` and alternatives for
-maintenance status and tokio support, record the choice in an ADR), WebSocket
-target discovery, `Network.enable`, correlation of
-`requestWillBeSent`/`requestWillBeSentExtraInfo`/`responseReceived`/
-`responseReceivedExtraInfo`/`loadingFinished`/`loadingFailed`,
-`Network.getResponseBody` with base64 handling and "not available" bodies,
-redirect chains, target navigation, reconnect without corrupting the session,
-and an integration test against a real Chromium instance.
+Implemented: target discovery, auto-attach with `waitForDebuggerOnStart`,
+flat sessions per page, `Network.enable`, correlation of
+`requestWillBeSent`/`responseReceived`/`loadingFinished`/`loadingFailed`,
+redirect chains, `Network.getResponseBody` (base64 and unavailable bodies),
+phase timings, bounded reconnect, and an integration test that drives a real
+Chromium against a local fixture. Decision recorded in ADR 0006.
 
-Until it exists, `netra capture --source cdp` exits with code 3 and says which
-milestone is missing.
+Deliberate gaps, each documented in `docs/architecture.md`:
+
+- `requestWillBeSentExtraInfo` / `responseReceivedExtraInfo` are ignored, so
+  duplicate response headers the protocol collapsed stay collapsed.
+- WebSockets are not inspected (M6).
+- The adapter attaches to an already-running browser; it never launches one.
+  Start Chrome with `--remote-debugging-port=9222`.
 
 ## M4 — HTTP/HTTPS proxy — not started
 

@@ -80,6 +80,23 @@ stored, already-redacted rows.
 - A live session records the pid of the process capturing it, so a second
   `netra` command never recovers (and stops) a capture that is still running.
 
+## CDP capture (implemented)
+
+Attaching to a browser gives `netra` access to everything that browser carries:
+cookies, tokens and personal data. The adapter therefore:
+
+- Connects only to an endpoint the user names (`--cdp-endpoint`, default
+  `127.0.0.1:9222`) and never launches or configures a browser itself.
+- Treats HTTP bodies above 8 MiB as omitted instead of materialising them.
+- Applies the same redaction, limits and persistence path as every other source,
+  so nothing captured over CDP bypasses the policy.
+
+The debugging port itself is a privileged surface: any local process that can
+reach it can drive the browser. `netra` does not open it — enabling
+`--remote-debugging-port` is the user's decision, and it should be a separate
+browser profile that is closed when the session ends. The adapter never asks for
+`--remote-allow-origins=*`.
+
 ## Proxy (milestone M4, not implemented)
 
 The contract the implementation must honour:

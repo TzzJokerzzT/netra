@@ -116,7 +116,39 @@ host feeds it a `Snapshot` (header + rows) and an `InspectorData` for the
 selection, and receives `AppAction`s. That keeps the UI testable with
 `TestBackend` and guarantees the UI cannot become the source of truth.
 
-## Adding a capture provider (M3/M4)
+## CDP source (M3, implemented)
+
+`netra-capture/cdp` speaks the DevTools Protocol directly (ADR 0006):
+
+- `protocol` parses frames into responses and events, and builds commands with
+  the flat `sessionId` when a target session is involved.
+- `discovery` resolves `/json/version` and `/json/list` over a minimal HTTP
+  client, because the endpoint is loopback and an HTTP stack is not warranted.
+- `mapping` is pure: it turns `Network.requestWillBeSent`,
+  `responseReceived`, `loadingFinished` and `loadingFailed` into
+  `CaptureEvent`s, computes phase timings as differences (never absolute
+  clocks), and marks bodies the browser cannot serve as `omitted`.
+- `provider` owns the lifecycle: `Target.setAutoAttach` with
+  `waitForDebuggerOnStart` so a newly created or cross-process target is held
+  until its `Network.enable` completes, flat sessions per page, asynchronous
+  `Network.getResponseBody`, and a bounded reconnect (three attempts) that emits
+  `SourceDisconnected`/`SourceReconnected` and ends the stream when it gives up.
+
+Known protocol limits, documented rather than hidden:
+
+- Response headers arrive as a JSON object, so duplicate names the protocol
+  itself collapsed stay collapsed (array values such as `Set-Cookie` are
+  expanded into separate lines).
+- `Network.responseReceivedExtraInfo` is not consumed yet; header order for
+  responses therefore follows the JSON object.
+- A payload above 8 MiB is reported as `omitted (too large)` rather than
+  materialised, in addition to the configured capture limit.
+- Requests that started before the adapter attached to a brand-new target can
+  only be missed if the target was created while no auto-attach was active;
+  `waitForDebuggerOnStart` closes that window for normal navigation.
+- WebSockets are not inspected yet (milestone M6).
+
+## Adding a capture provider (M4)
 
 Implement `CaptureProvider`:
 
@@ -128,3 +160,7 @@ Implement `CaptureProvider`:
    log payloads in the adapter.
 4. Register the provider in `netra-cli`'s `providers_for` and delete the
    corresponding "not implemented" arm.
+
+The runtime calls `provider.start()` before spawning any task, so a source that
+cannot start fails the capture immediately instead of producing a session that
+silently captured nothing.

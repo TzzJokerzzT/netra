@@ -17,7 +17,7 @@ the CLI says so instead of pretending.
 | M0 | Workspace, domain, ports, CLI, CI | done |
 | M1 | Ratatui/crossterm TUI: layout, list, inspector tabs, filters, help | done |
 | M2 | SQLite: migrations, incremental persistence, recovery, limits | done |
-| M3 | CDP capture (Chrome/Chromium) | not started |
+| M3 | CDP capture (Chrome/Chromium) | done |
 | M4 | HTTP/HTTPS proxy with local CA | not started |
 | M5 | Analysis depth (waterfall UI, search UX) | partially: analysis engine done |
 | M6 | Replay, HAR import, compare, WebSockets, stats UI | not started |
@@ -49,7 +49,8 @@ cargo fmt --all --check
 ```bash
 netra                              # TUI over the most recent session
 netra capture --demo --source cdp  # scripted synthetic capture (~1s)
-netra capture --source cdp         # exits 3: live CDP capture arrives in M3
+netra capture --source cdp         # live capture from Chrome/Chromium
+netra capture --source cdp --cdp-endpoint 127.0.0.1:9333
 netra sessions list                # table; --json for machine output
 netra sessions open <id>           # TUI for one session (unique id prefix works)
 netra sessions rename <id> <name>
@@ -79,6 +80,24 @@ records: capture data lives in SQLite, not in the UI.
 | 2 | usage error (clap) |
 | 3 | feature not available yet |
 | 4 | requested session does not exist |
+
+### Live CDP capture
+
+Start a browser with the DevTools port open, in its own profile, then capture:
+
+```bash
+chromium --remote-debugging-port=9222 --user-data-dir=/tmp/netra-profile &
+netra capture --source cdp --name "checkout flow"
+# browse in that browser; Ctrl-C stops capture and persists the session
+```
+
+`netra` connects to an already-running browser; it never launches one and never
+changes its flags. Default endpoint is `127.0.0.1:9222`.
+
+Known limits of CDP capture (documented in `docs/architecture.md`): response
+headers collapsed by the protocol stay collapsed, WebSockets are not inspected
+yet, `responseReceivedExtraInfo` is not consumed, and payloads over 8 MiB are
+reported as omitted instead of being loaded.
 
 ## Where data lives
 
