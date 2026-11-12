@@ -47,6 +47,27 @@ pub struct ProxySettings {
     pub max_connections: usize,
     /// TLS interception is opt-in and requires a generated CA.
     pub intercept_tls: bool,
+    /// Largest body the proxy will hold in memory; bigger bodies are refused.
+    #[serde(default = "default_proxy_body_bytes")]
+    pub max_body_bytes: usize,
+    /// Per-step I/O timeout in seconds.
+    #[serde(default = "default_proxy_timeout")]
+    pub timeout_secs: u64,
+    /// Extra trusted roots for upstream TLS (corporate interception, tests).
+    #[serde(default)]
+    pub extra_trust_roots: Vec<PathBuf>,
+    /// Allow binding a non-loopback address. Off by default: an open proxy is
+    /// an exfiltration path.
+    #[serde(default)]
+    pub allow_remote: bool,
+}
+
+fn default_proxy_body_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
+fn default_proxy_timeout() -> u64 {
+    30
 }
 
 impl Default for ProxySettings {
@@ -54,8 +75,12 @@ impl Default for ProxySettings {
         Self {
             bind_addr: "127.0.0.1".to_owned(),
             port: 8080,
-            max_connections: 128,
+            max_connections: 64,
             intercept_tls: false,
+            max_body_bytes: default_proxy_body_bytes(),
+            timeout_secs: default_proxy_timeout(),
+            extra_trust_roots: Vec::new(),
+            allow_remote: false,
         }
     }
 }
@@ -192,6 +217,22 @@ impl NetraConfig {
         if self.proxy.max_connections == 0 {
             return Err("proxy.max_connections must be greater than zero".to_owned());
         }
+        if self.proxy.max_body_bytes == 0 {
+            return Err("proxy.max_body_bytes must be greater than zero".to_owned());
+        }
+        if self.proxy.timeout_secs == 0 {
+            return Err("proxy.timeout_secs must be greater than zero".to_owned());
+        }
+        let is_loopback = matches!(
+            self.proxy.bind_addr.trim(),
+            "127.0.0.1" | "localhost" | "::1" | "[::1]"
+        );
+        if !is_loopback && !self.proxy.allow_remote {
+            return Err(format!(
+                "proxy.bind_addr {} is not loopback; set proxy.allow_remote to true only if you really want to listen beyond this machine",
+                self.proxy.bind_addr
+            ));
+        }
         Ok(())
     }
 }
@@ -241,6 +282,28 @@ mod tests {
         assert!(!config.proxy.intercept_tls);
         assert!(config.limits.max_body_bytes > 0);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn exposing_the_proxy_requires_explicit_intent() {
+        let mut config = NetraConfig::with_default_data_dir();
+        config.proxy.bind_addr = "0.0.0.0".to_owned();
+        assert!(config.validate().is_err());
+        config.proxy.allow_remote = true;
+        assert!(config.validate().is_ok());
+        config.proxy.bind_addr = "127.0.0.1".to_owned();
+        config.proxy.allow_remote = false;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn proxy_limits_must_be_positive() {
+        let mut config = NetraConfig::with_default_data_dir();
+        config.proxy.max_body_bytes = 0;
+        assert!(config.validate().is_err());
+        config.proxy.max_body_bytes = 1024;
+        config.proxy.timeout_secs = 0;
+        assert!(config.validate().is_err());
     }
 
     #[test]
