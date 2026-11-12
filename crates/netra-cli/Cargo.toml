@@ -14,14 +14,25 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
+crossterm = "0.29.0"
 netra-analysis.workspace = true
 netra-application.workspace = true
 netra-capture.workspace = true
 netra-core.workspace = true
 netra-storage.workspace = true
 netra-tui = { version = "0.1.0", path = "../netra-tui" }
+ratatui = "0.29.0"
+serde_json = "1.0.154"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
