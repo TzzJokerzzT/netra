@@ -187,6 +187,10 @@ impl RedactionPolicy {
     }
 
     /// Masks every configured header value in place, keeping names and order.
+    ///
+    /// Header values that carry a URL (`Referer`, `Location`, `Origin`) keep
+    /// their text but lose sensitive query values: a token in a referrer is the
+    /// same leak as a token in the request line.
     pub fn redact_headers(&self, headers: &mut HttpHeaders) -> usize {
         let mut changed = 0;
         let names = self.header_names.clone();
@@ -198,7 +202,48 @@ impl RedactionPolicy {
                 }
             }
         }
+        for entry in headers.iter_mut() {
+            if entry.value.contains("://")
+                && let Some(masked) = self.mask_url_text(&entry.value)
+            {
+                entry.value = masked;
+                changed += 1;
+            }
+        }
         changed
+    }
+
+    /// Masks sensitive query values inside a URL embedded in free text.
+    ///
+    /// Accepts absolute URLs and root-relative paths (`/cb?token=...`), because
+    /// both appear verbatim in bodies and headers. Any other text is left
+    /// untouched.
+    ///
+    /// Returns `Some(masked)` only when something actually changed, so callers
+    /// can leave untouched values alone.
+    #[must_use]
+    pub fn mask_url_text(&self, raw: &str) -> Option<String> {
+        let (head, rest) = raw.split_once('?')?;
+        let looks_like_url = head.contains("://") || head.starts_with('/');
+        if !looks_like_url || head.contains(char::is_whitespace) {
+            return None;
+        }
+        let (query, tail) = match rest.split_once('#') {
+            Some((query, fragment)) => (query, format!("#{fragment}")),
+            None => (rest, String::new()),
+        };
+        let mut changed = false;
+        let masked: Vec<String> = query
+            .split('&')
+            .map(|pair| match pair.split_once('=') {
+                Some((name, _)) if self.is_sensitive_query_param(name) => {
+                    changed = true;
+                    format!("{name}={}", self.replacement)
+                }
+                _ => pair.to_owned(),
+            })
+            .collect();
+        changed.then(|| format!("{head}?{}{tail}", masked.join("&")))
     }
 
     /// Masks configured query parameter values in a URL.
@@ -308,6 +353,12 @@ impl RedactionPolicy {
                     self.redact_json(item, report);
                 }
             }
+            serde_json::Value::String(text) => {
+                if let Some(masked) = self.mask_url_text(text) {
+                    *text = masked;
+                    report.query_values += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -339,9 +390,11 @@ impl RedactionPolicy {
         let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
             return;
         };
-        let before = report.json_values;
+        let before = (report.json_values, report.query_values);
         self.redact_json(&mut value, report);
-        if report.json_values != before
+        // Both counters matter: masking a URL inside a string is a query-value
+        // redaction, and the masked document still has to be written back.
+        if (report.json_values, report.query_values) != before
             && let Ok(serialized) = serde_json::to_vec(&value)
         {
             let len = u64::try_from(serialized.len()).unwrap_or(u64::MAX);
@@ -505,6 +558,50 @@ mod tests {
         let url = policy.redact_url(&RequestUrl::new(raw), &mut report);
         assert_eq!(url.as_str(), raw);
         assert!(report.is_empty());
+    }
+
+    #[test]
+    fn urls_inside_json_strings_lose_their_sensitive_query_values() {
+        let policy = RedactionPolicy::default();
+        let mut value = serde_json::json!({
+            "path": "/api/items?token=abc&page=2",
+            "absolute": "https://api.test/cb?access_token=xyz",
+            "note": "no url here",
+        });
+        let mut report = RedactionReport::default();
+        policy.redact_json(&mut value, &mut report);
+        // A root-relative path that carries a token is still a URL to mask.
+        assert_eq!(value["path"], "/api/items?token=[REDACTED]&page=2");
+        assert_eq!(
+            value["absolute"],
+            "https://api.test/cb?access_token=[REDACTED]"
+        );
+        assert_eq!(value["note"], "no url here");
+        assert_eq!(report.query_values, 2);
+    }
+
+    #[test]
+    fn header_values_that_are_urls_are_masked_but_kept() {
+        let policy = RedactionPolicy::default();
+        let mut headers = HttpHeaders::from_pairs([
+            ("Referer", "http://api.test/page?token=secret&page=2"),
+            ("Location", "https://api.test/next?page=3"),
+            ("X-Note", "https://api.test/x?token=secret"),
+        ]);
+        policy.redact_headers(&mut headers);
+        assert_eq!(
+            headers.get("referer"),
+            Some("http://api.test/page?token=[REDACTED]&page=2")
+        );
+        // Untouched: no sensitive parameter.
+        assert_eq!(
+            headers.get("location"),
+            Some("https://api.test/next?page=3")
+        );
+        assert_eq!(
+            headers.get("x-note"),
+            Some("https://api.test/x?token=[REDACTED]")
+        );
     }
 
     #[test]
