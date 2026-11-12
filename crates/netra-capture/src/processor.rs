@@ -756,3 +756,50 @@ mod tests {
         assert_eq!(processor.tracked_exchanges(), 0);
     }
 }
+
+#[cfg(test)]
+mod pipeline_redaction {
+    use netra_core::{
+        config::CaptureLimits,
+        domain::{
+            Body, CaptureEvent, CaptureSource, ContentType, ExchangeUpdate, HttpHeaders,
+            HttpMethod, NetworkRequest, NetworkResponse, RedactionPolicy, RequestUrl, SessionId,
+            SourceKey, StatusCode, Timestamp,
+        },
+    };
+
+    use crate::processor::CaptureProcessor;
+
+    #[test]
+    fn url_shaped_strings_inside_json_bodies_are_masked() {
+        let mut processor = CaptureProcessor::new(
+            SessionId::new(),
+            CaptureLimits::default(),
+            RedactionPolicy::default(),
+        );
+        processor.apply(CaptureEvent::RequestStarted {
+            key: SourceKey::new(CaptureSource::Proxy, "1"),
+            request: NetworkRequest::new(
+                HttpMethod::parse("GET").unwrap(),
+                RequestUrl::new("http://127.0.0.1:1/api"),
+                Timestamp::now(),
+            ),
+        });
+        let mut response =
+            NetworkResponse::new(StatusCode::try_new(200).unwrap(), Timestamp::now());
+        response.headers = HttpHeaders::from_pairs([("Content-Type", "application/json")]);
+        response.body = Body::captured(
+            Some(ContentType::parse("application/json")),
+            br#"{"ok": true, "path": "/api/through-proxy?token=leaks"}"#.to_vec(),
+        );
+        let updates = processor.apply(CaptureEvent::ResponseReceived {
+            key: SourceKey::new(CaptureSource::Proxy, "1"),
+            response,
+        });
+        let body = match &updates[0] {
+            ExchangeUpdate::Response { response, .. } => response.body.text().unwrap(),
+            other => panic!("unexpected {other:?}"),
+        };
+        assert!(!body.contains("token=leaks"), "stored body: {body}");
+    }
+}
