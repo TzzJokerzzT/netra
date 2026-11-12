@@ -15,9 +15,7 @@ use netra_core::{
         SessionStatus, SourceSelection, TimingMetrics,
     },
     error::{StorageError, StorageResult},
-    ports::{
-        CaptureProvider, ExchangeCounts, ExchangeRepository, SystemClock,
-    },
+    ports::{CaptureProvider, Clock, ExchangeCounts, ExchangeRepository, SystemClock},
 };
 use netra_storage::SqliteStore;
 
