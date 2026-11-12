@@ -63,7 +63,13 @@ impl Default for ProxySettings {
 /// Top-level configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct NetraConfig {
-    /// Directory holding the database, the CA material and exports.
+    /// Directory holding the database, the certificate material and exports.
+    ///
+    /// When a configuration file sets `data_dir`, that path is honoured
+    /// (relative paths resolve against the configuration file's directory).
+    /// When it is omitted or empty, the file's directory is used. The value is
+    /// never written back, so moving a data directory stays a deliberate act.
+    #[serde(default, skip_serializing)]
     pub data_dir: PathBuf,
     /// Capture size limits.
     #[serde(default)]
@@ -114,9 +120,19 @@ impl NetraConfig {
                         path: path.to_path_buf(),
                         reason: error.to_string(),
                     })?;
-                config.data_dir = path
+                let parent = path
                     .parent()
                     .map_or_else(default_data_dir, Path::to_path_buf);
+                config.data_dir = if config.data_dir.as_os_str().is_empty() {
+                    parent
+                } else if config.data_dir.is_absolute() {
+                    config.data_dir
+                } else {
+                    parent.join(config.data_dir)
+                };
+                // Configuration adds redaction rules; it never drops the
+                // defaults that the security documentation promises.
+                config.redaction = config.redaction.merged_with_defaults();
                 Ok(config)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -262,6 +278,79 @@ mod tests {
         let path = dir.path().join("config.json");
         fs::write(&path, "{ not json").unwrap();
         assert!(NetraConfig::load_or_default(&path).is_err());
+    }
+
+    #[test]
+    fn configured_data_dir_is_honoured_instead_of_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"data_dir":"/tmp/netra-explicit","proxy":{"bind_addr":"127.0.0.1","port":9000,"max_connections":4,"intercept_tls":false}}"#).unwrap();
+        let config = NetraConfig::load_or_default(&path).unwrap();
+        assert_eq!(config.data_dir, PathBuf::from("/tmp/netra-explicit"));
+        assert_eq!(
+            config.database_path(),
+            PathBuf::from("/tmp/netra-explicit/netra.db")
+        );
+    }
+
+    #[test]
+    fn relative_data_dir_resolves_against_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"data_dir":"store"}"#).unwrap();
+        let config = NetraConfig::load_or_default(&path).unwrap();
+        assert_eq!(config.data_dir, dir.path().join("store"));
+    }
+
+    #[test]
+    fn a_partial_config_no_longer_fails_on_the_missing_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, "{}").unwrap();
+        let config = NetraConfig::load_or_default(&path).unwrap();
+        assert_eq!(config.data_dir, dir.path());
+    }
+
+    #[test]
+    fn saving_never_writes_the_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        NetraConfig::with_default_data_dir().save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("data_dir"),
+            "data_dir must stay derived: {text}"
+        );
+    }
+
+    #[test]
+    fn configured_redaction_rules_add_to_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"redaction":{"header_names":["x-my-token"]}}"#).unwrap();
+        let config = NetraConfig::load_or_default(&path).unwrap();
+        assert!(
+            config
+                .redaction
+                .header_names
+                .iter()
+                .any(|name| name == "x-my-token")
+        );
+        assert!(
+            config
+                .redaction
+                .header_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("authorization")),
+            "adding a rule must not drop the credential carriers"
+        );
+        assert!(
+            config
+                .redaction
+                .query_params
+                .iter()
+                .any(|name| name == "token")
+        );
     }
 
     #[test]
