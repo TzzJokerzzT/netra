@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 crossterm = "0.29.0"
+netra-analysis = { version = "0.1.0", path = "../netra-analysis" }
 netra-application.workspace = true
 netra-core.workspace = true
 ratatui = "0.29.0"
