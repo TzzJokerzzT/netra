@@ -34,6 +34,17 @@ Feature branch: `feat/netra-foundation`. Specification source: `../netra_network
 - **S9 (documentación).** "`README.md`: descripción, requisitos, instalación, uso y ejemplos." — "`docs/architecture.md`:
   capas, crates, flujos y contratos." — "`docs/security.md`: modelo de amenazas, CA, TLS, redacción, proxy y Replay."
   — "`docs/roadmap.md`: milestones y estado." — "`docs/adr/`: Architecture Decision Records."
+- **S11 (M3 CDP).** "Conectar a Chrome/Chromium. Procesar eventos Network. Correlacionar requests y responses.
+  Gestionar redirecciones y fallos. Obtener response bodies cuando sea posible. Persistir eventos.
+  Resultado: captura real de Chrome." — "Conexión WebSocket a Chrome/Chromium." — "Habilitar el dominio
+  `Network`." — "Procesar, al menos, `Network.requestWillBeSent`, `Network.requestWillBeSentExtraInfo`,
+  `Network.responseReceived`, `Network.responseReceivedExtraInfo`, `Network.loadingFinished` y
+  `Network.loadingFailed`." — "Tratar correctamente cuerpos base64 y respuestas no recuperables." —
+  "Manejar desconexión y reconexión sin corromper sesiones." — "No asumir que CDP proporciona todos los timings
+  o cuerpos en todos los casos."
+- **S12 (dependencias verificadas).** "Utilizar versiones estables y compatibles verificadas al iniciar el
+  proyecto." — "Si una librería propuesta no está mantenida, no es compatible o no ofrece la funcionalidad
+  necesaria, investiga una alternativa y documenta la decisión antes de introducirla."
 - **S10 (no fingir).** "No afirmes que una función está implementada si solo existe una maqueta o stub." — "Nunca
   simules una captura real con datos mock en una función que se presente como terminada."
 
@@ -51,6 +62,10 @@ Feature branch: `feat/netra-foundation`. Specification source: `../netra_network
 | T8 | S2, S4, S6 | worker (`gentle-ai-worker`) | TUI Ratatui: layout adaptable, lista, inspector de 7 tabs, filtros, ayuda, confirmación. | `feat(tui): navigable inspector with adaptive layout` |
 | T9 | S7, S8, S10 | inline | CLI real: capture/sessions/config, códigos de salida, TUI host, demo etiquetada. | `feat(cli): capture, sessions, export and the TUI host` |
 | T10 | S9 | inline | README, architecture, security, roadmap y 5 ADRs. | `docs: architecture, security model, roadmap and ADRs` |
+| T11 | S11, S12 | inline | ADR 0006: cliente CDP propio sobre tokio-tungstenite, alternativas evaluadas con datos de crates.io. | `docs(adr): choose an in-tree CDP client` |
+| T12 | S11, S12, S8 | inline | `netra-capture/cdp`: protocolo, discovery, mapeo puro de eventos Network y provider con sesiones flat, auto-attach y bodies. | `feat(capture): CDP provider for Chrome/Chromium` |
+| T13 | S11, S12 | inline | CLI `--cdp-endpoint`, `--source cdp` real; el proxy sigue nombrando M4. Fallo rápido si el proveedor no arranca. | `feat(cli): live CDP capture wiring` |
+| T14 | S11, S8 | inline | Test de integración contra Chromium real con fixture local; regresiones del traductor y de bodies. | incluido en T12 |
 
 Naming note: the original plan had 7 tasks; the delta/broadcast split made T3–T7 explicit so every commit is a
 single reviewable work unit.
@@ -98,6 +113,19 @@ single reviewable work unit.
 - **L12 (provider stop).** The native RDD review of the storage work unit was refused with
   `lens_context_budget_exceeded` (~1900 authored lines with tests): no review authority was created, and the
   provider requires splitting the candidate into chained smaller commits before reviewing.
+- **L14 (user, verbatim).** "Si no esta en el documento, usa un CDP adecuado para el proyecto y un ADR"
+- **L15 (research, crates.io 2026-11-12).** `chromiumoxide` 0.9.1 (actualizado 2026-02-25, 5.7M descargas,
+  embebe el protocolo generado completo), `headless_chrome` 1.0.22 (2026-06-11, API síncrona), `browser-protocol`
+  0.1.6 (2026-10-03, 583 descargas), `tokio-tungstenite` 0.30.0 y `serde_json` como base. Decisión: cliente CDP
+  propio en `netra-capture/cdp` (ADR 0006), no por moda sino porque el adaptador solo necesita cuatro métodos y
+  la traducción a `CaptureEvent` ya existe.
+- **L16 (evidence, CDP end-to-end).** Chromium 155 headless + fixture local: `netra capture --source cdp
+  --cdp-endpoint 127.0.0.1:9499` persistió 18 exchanges con cuerpos y timings; el query `?token=leaks` quedó como
+  `token=%5BREDACTED%5D` en la base. Test de integración `cdp_integration` (se saltea si no hay binario y usa
+  `NETRA_CHROMIUM` para fijarlo). Total del workspace: 258 tests.
+- **L17 (defect found during M3).** Una captura cuyo proveedor no arranca salía con código 0 y una sesión vacía.
+  Ahora el runtime llama `provider.start()` antes de lanzar tareas y falla cerrado (código 1), borrando la sesión
+  creada.
 - **L13 (user decision, verbatim).** "No lo haga manda el commit con las 1900 lineas." — the storage work unit
   stays as one commit; it is not split. Consequence, recorded so it is not mistaken for an oversight: that
   candidate cannot pass the native reviewer budget, so it carries no native review; its risk is covered by the
