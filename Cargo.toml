@@ -16,7 +16,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["netra contributors"]
-repository = "https://github.com/netra-tui/netra"
+repository = "https://github.com/TzzJokerzzT/netra"
 
 [workspace.dependencies]
 netra-core = { path = "crates/netra-core" }

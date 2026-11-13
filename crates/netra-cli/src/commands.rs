@@ -24,7 +24,7 @@ use crate::{
     app::Bootstrap,
     args::{
         CaptureArgs, ConfigArgs, DeleteArgs, ExportArgs, ExportCaArgs, ListArgs, RenameArgs,
-        SaveArgs,
+        SaveArgs, UpdateArgs,
     },
     exit::ExitCode,
 };
@@ -241,7 +241,24 @@ pub fn config(bootstrap: &Bootstrap, args: &ConfigArgs) -> ExitCode {
             "disabled"
         }
     );
+    println!(
+        "update        startup check {} · cache {}",
+        if bootstrap.config.update.check {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        bootstrap.config.update_check_path().display()
+    );
     ExitCode::Success
+}
+
+/// Runs `netra update`.
+pub async fn update(args: &UpdateArgs) -> ExitCode {
+    match crate::update::run(args).await {
+        Ok(()) => ExitCode::Success,
+        Err(error) => crate::update::report(&error),
+    }
 }
 
 /// Runs `netra capture`.

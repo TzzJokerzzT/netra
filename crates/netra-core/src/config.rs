@@ -87,6 +87,23 @@ impl Default for ProxySettings {
     }
 }
 
+/// Update-check settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Look for a newer release at startup and cache the answer.
+    ///
+    /// Disabling it stops both the notice and the background query: nothing is
+    /// fetched and nothing is written.
+    pub check: bool,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self { check: true }
+    }
+}
+
 /// Top-level configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct NetraConfig {
@@ -107,6 +124,9 @@ pub struct NetraConfig {
     /// Proxy listener settings.
     #[serde(default)]
     pub proxy: ProxySettings,
+    /// Update check settings.
+    #[serde(default)]
+    pub update: UpdateSettings,
 }
 
 impl NetraConfig {
@@ -118,6 +138,7 @@ impl NetraConfig {
             limits: CaptureLimits::default(),
             redaction: RedactionPolicy::default(),
             proxy: ProxySettings::default(),
+            update: UpdateSettings::default(),
         }
     }
 
@@ -131,6 +152,12 @@ impl NetraConfig {
     #[must_use]
     pub fn config_path(&self) -> PathBuf {
         self.data_dir.join("config.json")
+    }
+
+    /// Path of the cached answer of the last release check.
+    #[must_use]
+    pub fn update_check_path(&self) -> PathBuf {
+        self.data_dir.join("update-check.json")
     }
 
     /// Loads configuration from `path`, falling back to defaults when the file
@@ -442,6 +469,30 @@ mod tests {
                 .query_params
                 .iter()
                 .any(|name| name == "token")
+        );
+    }
+
+    #[test]
+    fn update_check_defaults_on_and_can_be_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let config = NetraConfig::load_or_default(&path).unwrap();
+        assert!(
+            config.update.check,
+            "the startup check is on unless the user opts out"
+        );
+        assert_eq!(
+            config.update_check_path(),
+            dir.path().join("update-check.json")
+        );
+
+        fs::write(&path, r#"{"update":{"check":false}}"#).unwrap();
+        let config = NetraConfig::load_or_default(&path).unwrap();
+        assert!(!config.update.check, "the opt-out is honoured");
+        assert_eq!(
+            config.proxy,
+            ProxySettings::default(),
+            "a partial update block keeps the other sections at their defaults"
         );
     }
 

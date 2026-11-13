@@ -149,6 +149,24 @@ is not implemented; nothing is ever sent.
   deletions are reported to the user.
 - Orphan responses are cached in a bounded map (256 entries).
 
+## Self-update (implemented)
+
+`netra update` downloads a binary over the network, so its trust model is
+stated rather than implied:
+
+- The release publishes a SHA-256 next to the asset. It detects corruption and
+truncation; it does not prove authenticity, because the checksum comes from the
+same account that publishes the binary. See ADR 0008.
+- Nothing replaces the binary except an explicit `netra update` (or
+`install.sh`). No command updates in the background.
+- The replacement is staged in the target directory and renamed over the old
+file, so a failed or interrupted update leaves a working binary.
+- `netra update` refuses a digest mismatch, refuses a target it cannot write, and
+names the path instead of guessing.
+- The startup check is passive: a cached answer, at most one request per day,
+a 2-second timeout, one stderr line, no download, and `{"update": {"check":
+false}}` disables it. It refuses a plain-`http` endpoint unless it is loopback.
+
 ## Reporting a problem
 
 Security issues should be reported privately to the maintainers rather than as a

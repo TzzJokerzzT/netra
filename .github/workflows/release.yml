@@ -1,0 +1,96 @@
+name: Release
+
+# A release is a tag: `vX.Y.Z`. Publishing it is what makes `netra update`
+# offer the new binary, so the tag and the workspace version must agree and the
+# assets must be verified before anything is published.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+  ASSET: netra-x86_64-unknown-linux-musl
+
+jobs:
+  release:
+    name: build, verify and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust stable and the musl target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add "$TARGET"
+
+      - name: Refuse a tag that disagrees with the crate version
+        run: |
+          set -euo pipefail
+          version="$(cargo pkgid -p netra-cli | sed 's/.*#//')"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version"
+            echo "bump [workspace.package] version in Cargo.toml or tag v$version instead"
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches version $version"
+
+      - name: Install the musl C toolchain
+        # rusqlite (bundled) and ring compile C; the musl target needs a musl cc.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          musl-gcc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test before anything is published
+        run: cargo test --workspace --locked
+
+      - name: Build the static binary
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          NETRA_BUILD_GIT_SHA: ${{ github.sha }}
+        run: cargo build --release --locked -p netra-cli --target "$TARGET"
+
+      - name: Package and checksum the assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          strip "target/$TARGET/release/netra"
+          cp "target/$TARGET/release/netra" "dist/$ASSET"
+          tar -C dist -czf "dist/$ASSET.tar.gz" "$ASSET"
+          cd dist
+          sha256sum "$ASSET" > "$ASSET.sha256"
+          sha256sum "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
+          ls -l
+
+      - name: Prove the published binary runs and reports its build
+        run: |
+          set -euo pipefail
+          report="$(./dist/$ASSET --version)"
+          echo "$report"
+          case "$report" in
+            *"${GITHUB_REF_NAME#v}"*) ;;
+            *) echo "::error::the binary does not report version ${GITHUB_REF_NAME#v}"; exit 1 ;;
+          esac
+          case "$report" in
+            *"$GITHUB_SHA"*) ;;
+            *) echo "::error::the binary does not report the build commit $GITHUB_SHA"; exit 1 ;;
+          esac
+          file "./dist/$ASSET"
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "netra ${GITHUB_REF_NAME#v}" \
+            --generate-notes

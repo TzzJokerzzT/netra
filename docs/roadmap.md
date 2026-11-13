@@ -60,9 +60,13 @@ Remaining: statistics screen in the TUI, richer search UX, comparison view.
 Safe replay with SSRF guards, HAR import, exchange comparison, WebSocket
 inspection, replay-driven regression checks. HAR **export** already exists.
 
-## M7 — Hardening and release — not started
+## M7 — Hardening and release — partially done
 
-Concurrency and stress tests (1 000 concurrent exchanges, slow storage),
-recovery tests under kill -9, security review, memory/storage profiling,
-installation documentation, binary distribution, `0.1.0` release criteria from
-the project brief.
+Landed: versioning tied to tags (`docs/release.md`), a release workflow that
+builds and publishes the static `x86_64-unknown-linux-musl` binary with SHA-256
+checksums (`docs/adr/0008-self-update-from-releases.md`), `netra update` with
+its passive startup notice, and `install.sh`.
+
+Still open: concurrency and stress tests (1 000 concurrent exchanges, slow
+storage), recovery tests under kill -9, security review, memory/storage
+profiling, and the `0.1.0` release criteria from the project brief.

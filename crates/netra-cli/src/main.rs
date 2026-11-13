@@ -5,6 +5,7 @@ mod args;
 mod commands;
 mod exit;
 mod tui;
+mod update;
 
 use clap::Parser;
 use netra_application::SessionService;
@@ -39,6 +40,12 @@ async fn main() -> std::process::ExitCode {
         Err(error) => eprintln!("netra: cannot recover interrupted sessions: {error}"),
     }
 
+    // The update notice goes to stderr before the TUI takes the terminal, and
+    // never runs for the commands that must stay silent and offline.
+    if !stays_offline(&cli.command) {
+        update::startup_check(&bootstrap.config);
+    }
+
     let code = match cli.command {
         None => open_latest(&bootstrap).await,
         Some(Command::Capture(args)) => commands::capture(&bootstrap, &args).await,
@@ -56,8 +63,18 @@ async fn main() -> std::process::ExitCode {
             SessionsCommand::Delete(args) => commands::sessions_delete(&bootstrap, &args).await,
             SessionsCommand::Export(args) => commands::sessions_export(&bootstrap, &args).await,
         },
+        Some(Command::Update(args)) => commands::update(&args).await,
     };
     code.into()
+}
+
+/// `true` for the commands whose start must not touch the network.
+///
+/// `--help` and `--version` never reach this code: clap answers them while
+/// parsing. The explicit update path must not consult a cache it is about to
+/// overwrite, and `netra config` reports the switch instead of acting on it.
+fn stays_offline(command: &Option<Command>) -> bool {
+    matches!(command, Some(Command::Update(_) | Command::Config(_)))
 }
 
 async fn open_latest(bootstrap: &app::Bootstrap) -> ExitCode {

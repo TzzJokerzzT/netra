@@ -1099,13 +1099,19 @@ dependencies = [
  "predicates",
  "ratatui",
  "rusqlite",
+ "rustls",
+ "semver",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "webpki-roots",
 ]
 
 [[package]]

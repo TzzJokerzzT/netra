@@ -14,6 +14,7 @@ use netra_core::domain::SourceSelection;
 #[command(
     name = "netra",
     version,
+    long_version = long_version(),
     about = "Capture, inspect and persist HTTP traffic from the terminal",
     long_about = None,
     disable_help_subcommand = true
@@ -39,6 +40,36 @@ pub enum Command {
     Ca(CaArgs),
     /// Show the effective configuration and data locations.
     Config(ConfigArgs),
+    /// Check for and install a newer netra release.
+    Update(UpdateArgs),
+}
+
+/// Arguments of `netra update`.
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Report the current and latest version without downloading anything.
+    #[arg(long, conflicts_with = "force")]
+    pub check: bool,
+
+    /// Reinstall even when the running version is already the latest.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Version reported by `netra --version`: the crate version and the commit the
+/// binary was built from, so a published binary can be traced to its build.
+#[must_use]
+pub fn long_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| format!("{} ({})", env!("CARGO_PKG_VERSION"), build_git_sha()))
+        .as_str()
+}
+
+/// Commit recorded at build time, or `unknown` for a local build.
+#[must_use]
+pub fn build_git_sha() -> &'static str {
+    option_env!("NETRA_BUILD_GIT_SHA").unwrap_or("unknown")
 }
 
 /// Arguments of `netra capture`.

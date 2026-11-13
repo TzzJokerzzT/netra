@@ -23,6 +23,10 @@ impl Sandbox {
         let mut command = Command::cargo_bin("netra").unwrap();
         command.env("XDG_DATA_HOME", self.directory.path());
         command.env("NETRA_LOG", "error");
+        // Never let the startup check or `netra update` reach the public API:
+        // the loopback override points at a closed port, so every attempt fails
+        // fast and silently instead of touching the network.
+        command.env("NETRA_UPDATE_API_BASE", loopback_override());
         command
     }
 
@@ -114,6 +118,183 @@ fn closed_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+/// Loopback API base that no server answers, used to keep tests offline.
+fn loopback_override() -> String {
+    format!("http://127.0.0.1:{}", closed_port())
+}
+
+#[test]
+fn version_reports_the_build_it_came_from() {
+    let sandbox = Sandbox::new();
+    let expected = format!("netra {} (unknown)", env!("CARGO_PKG_VERSION"));
+    sandbox
+        .command()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(expected.clone()));
+    sandbox
+        .command()
+        .arg("-V")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+    // A local build has no commit to report, and says so instead of guessing.
+    assert!(expected.ends_with("(unknown)"));
+}
+
+#[test]
+fn update_refuses_a_non_loopback_http_override() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .command()
+        .env("NETRA_UPDATE_API_BASE", "http://api.example.com:80")
+        .args(["update", "--check"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("NETRA_UPDATE_API_BASE"))
+        .stderr(predicate::str::contains("loopback"));
+}
+
+#[test]
+fn update_refuses_check_together_with_force() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .command()
+        .args(["update", "--check", "--force"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--check"))
+        .stderr(predicate::str::contains("--force"));
+}
+
+#[test]
+fn update_without_a_reachable_api_fails_cleanly() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .command()
+        .args(["update", "--check"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("netra: cannot reach"))
+        .stderr(predicate::str::contains("panicked").not())
+        .stderr(predicate::str::contains("RUST_BACKTRACE").not());
+}
+
+#[test]
+fn config_reports_the_update_check_switch() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .command()
+        .arg("config")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("startup check enabled"))
+        .stdout(predicate::str::contains("update-check.json"));
+    sandbox
+        .command()
+        .args(["config", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"update\""))
+        .stdout(predicate::str::contains("\"check\": true"));
+}
+
+/// Seeds the cached release answer the startup notice reads.
+fn seed_cache(sandbox: &Sandbox, latest: &str, age: chrono::Duration) -> std::path::PathBuf {
+    let data_dir = sandbox.data_dir();
+    fs::create_dir_all(&data_dir).unwrap();
+    let path = data_dir.join("update-check.json");
+    let checked_at = (chrono::Utc::now() - age).to_rfc3339();
+    fs::write(
+        &path,
+        format!(r#"{{"checked_at":"{checked_at}","latest":"{latest}"}}"#),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn a_newer_cached_release_is_announced_on_stderr() {
+    let sandbox = Sandbox::new();
+    seed_cache(&sandbox, "0.2.0", chrono::Duration::hours(1));
+    sandbox
+        .command()
+        .args(["sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no sessions yet"))
+        .stderr(predicate::str::contains(
+            "⚠ netra 0.2.0 disponible — corré `netra update`",
+        ));
+}
+
+#[test]
+fn a_current_cached_release_is_not_announced() {
+    let sandbox = Sandbox::new();
+    seed_cache(
+        &sandbox,
+        env!("CARGO_PKG_VERSION"),
+        chrono::Duration::hours(1),
+    );
+    sandbox
+        .command()
+        .args(["sessions", "list"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("disponible").not());
+}
+
+#[test]
+fn a_disabled_update_check_prints_no_notice_and_keeps_the_cache() {
+    let sandbox = Sandbox::new();
+    let data_dir = sandbox.data_dir();
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(
+        data_dir.join("config.json"),
+        r#"{"update":{"check":false}}"#,
+    )
+    .unwrap();
+    let cache = seed_cache(&sandbox, "0.2.0", chrono::Duration::hours(48));
+    let before = fs::read_to_string(&cache).unwrap();
+
+    sandbox
+        .command()
+        .args(["sessions", "list"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("disponible").not());
+    assert_eq!(
+        fs::read_to_string(&cache).unwrap(),
+        before,
+        "a disabled check never rewrites the cache"
+    );
+    sandbox
+        .command()
+        .arg("config")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("startup check disabled"));
+}
+
+#[test]
+fn a_disabled_update_check_never_creates_the_cache() {
+    let sandbox = Sandbox::new();
+    let data_dir = sandbox.data_dir();
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(
+        data_dir.join("config.json"),
+        r#"{"update":{"check":false}}"#,
+    )
+    .unwrap();
+    sandbox
+        .command()
+        .args(["sessions", "list"])
+        .assert()
+        .success();
+    assert!(!data_dir.join("update-check.json").exists());
 }
 
 #[test]

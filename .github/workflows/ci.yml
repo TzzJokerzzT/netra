@@ -22,6 +22,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
+      - name: Installer script syntax
+        run: bash -n install.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test

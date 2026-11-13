@@ -22,7 +22,7 @@ pretending.
 | M4 | HTTP/HTTPS proxy with local CA | done |
 | M5 | Analysis depth (waterfall UI, search UX) | partially: analysis engine done |
 | M6 | Replay, HAR import, compare, WebSockets, stats UI | not started |
-| M7 | Hardening and release | not started |
+| M7 | Hardening and release | partially: versioning, release automation and self-update |
 
 `netra capture --demo` runs a **synthetic** scripted capture. It exercises the
 whole pipeline (correlation, redaction, limits, storage, recovery) and is
@@ -30,37 +30,59 @@ labelled as demo everywhere it appears. It is not real traffic capture.
 
 ## Install
 
-`netra` is not published on crates.io yet; it installs from this checkout.
+`netra` ships as a statically linked Linux x86_64 binary through GitHub
+Releases, so installing a release needs no toolchain. It is not on crates.io
+yet.
 
-### Recommended: install into a directory already in your PATH
-
-```bash
-cd netra
-cargo install --path crates/netra-cli --root ~/.local --locked
-```
-
-That puts the binary at `~/.local/bin/netra`. Most Arch/Omarchy, Debian and
-macOS setups already have `~/.local/bin` in `PATH`; check with:
+The install script does the whole job: it takes the latest release, verifies its
+SHA-256, installs the binary into `~/.local/bin` (or the directory you name),
+tells you if that directory is not in `PATH`, and proves the result runs.
 
 ```bash
-echo "$PATH" | tr ':' '\n' | grep -Fx "$HOME/.local/bin"
-netra --version
+curl -fsSL https://raw.githubusercontent.com/TzzJokerzzT/netra/main/install.sh | bash
 ```
 
-### Alternative: let Cargo pick the location
+Read it before handing it a shell — that is the point of a script that verifies
+checksums:
 
 ```bash
-cargo install --path crates/netra-cli --locked
+curl -fsSL -O https://raw.githubusercontent.com/TzzJokerzzT/netra/main/install.sh
+less install.sh
+bash install.sh
 ```
 
-This installs into `$CARGO_HOME/bin` (default `~/.cargo/bin`). If `netra: command
-not found` appears afterwards, that directory is not in `PATH`:
+Options:
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"   # add to ~/.zshrc / ~/.bashrc / config.fish
+./install.sh --dir ~/bin         # install somewhere else
+./install.sh --version v0.2.0    # pin a release instead of taking the latest
+./install.sh --from-source       # build this checkout with cargo
 ```
 
-### Portable binary
+`NETRA_INSTALL_DIR`, `NETRA_VERSION` and `NETRA_REPO` do the same from the
+environment. The script refuses a platform other than Linux x86_64 instead of
+installing a binary that cannot run, refuses a release whose checksum does not
+match what it downloaded, and exits non-zero naming the path when the installed
+binary cannot execute (a `noexec` mount, a lost execute bit) — the binary stays
+in place so you can fix the cause instead of reinstalling.
+
+### From a checkout, with cargo
+
+Use this when no release exists yet, or when you want your own build:
+
+```bash
+cargo install --path crates/netra-cli --root ~/.local --locked   # ~/.local/bin/netra
+cargo install --path crates/netra-cli --locked                   # $CARGO_HOME/bin
+```
+
+If `netra: command not found` appears afterwards, that directory is not in
+`PATH`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"   # add to ~/.zshrc / ~/.bashrc / config.fish
+```
+
+### Portable binary build
 
 No runtime dependencies are needed beyond libc: SQLite is compiled in.
 
@@ -73,7 +95,7 @@ install -Dm755 target/release/netra ~/.local/bin/netra
 
 ```bash
 netra --version
-netra config          # shows the data directory, limits, proxy and redaction state
+netra config          # shows the data directory, limits, proxy, redaction and update check
 netra capture --demo  # synthetic capture, ~1s, proves storage + redaction work
 netra sessions list
 netra                 # TUI over the most recent session (q to quit)
@@ -92,15 +114,36 @@ netra capture --source proxy --proxy-port 8080
 
 ### Update and uninstall
 
+An installed `netra` updates itself from the latest published release:
+
 ```bash
-git pull && cargo install --path crates/netra-cli --root ~/.local --locked
-cargo uninstall netra-cli                       # or simply rm the netra binary
+netra update --check    # what is published versus what you run; downloads nothing
+netra update            # download, verify the SHA-256, replace the binary
+netra update --force    # reinstall even when the version is already current
 ```
 
-Uninstalling leaves captured data behind by design: it lives in
-`$XDG_DATA_HOME/netra` (default `~/.local/share/netra`). Remove that directory
-only if you also want to delete the sessions, the exported HAR files and the
-local certificate authority.
+The replacement is atomic: the new binary is staged next to the target and
+renamed into place, so an interrupted update leaves the previous binary intact.
+`netra update` refuses a checksum mismatch and never writes into a directory you
+cannot write to — it names the path instead. `--check` and `--force` are
+mutually exclusive, and `--check` exits non-zero when there is no release to
+compare against (none published, or the API is unreachable) instead of claiming
+the build is current. The startup notice only says that a
+newer release exists; it never downloads anything by itself. Turn it off in
+`$XDG_DATA_HOME/netra/config.json` (default `~/.local/share/netra/config.json`):
+
+```json
+{ "update": { "check": false } }
+```
+
+From a checkout, update the checkout instead: `git pull && ./install.sh
+--from-source`.
+
+Uninstall by removing the binary (`rm "$(command -v netra)"`, or
+`cargo uninstall netra-cli` for a cargo install). Captured data stays behind by
+design: it lives in `$XDG_DATA_HOME/netra` (default `~/.local/share/netra`).
+Remove that directory only if you also want to delete the sessions, the exported
+HAR files and the local certificate authority.
 
 ## Requirements
 
@@ -115,10 +158,20 @@ local certificate authority.
 
 ```bash
 cargo build --release            # binary at target/release/netra
+cargo build --release -p netra-cli --target x86_64-unknown-linux-musl   # what a release ships
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
+
+## Release
+
+A release is a tag, `vX.Y.Z`, whose version matches `[workspace.package]
+version` in `Cargo.toml`. Pushing it runs `.github/workflows/release.yml`, which
+tests the workspace, builds the static `x86_64-unknown-linux-musl` binary,
+publishes it with a `.sha256` alongside, and is what makes `netra update` offer
+the new build. The full procedure, including how the version is chosen and what
+the checksums do and do not protect, is in `docs/release.md`.
 
 ## Usage
 
@@ -229,6 +282,7 @@ See `docs/security.md` for the threat model and the known limits.
 - `docs/architecture.md` — layers, crates, contracts and data flow.
 - `docs/security.md` — threat model, redaction, proxy and replay rules.
 - `docs/roadmap.md` — milestones and what each one still needs.
+- `docs/release.md` — versioning, cutting a release, and how self-update works.
 - `docs/adr/` — architecture decision records.
 
 ## License
