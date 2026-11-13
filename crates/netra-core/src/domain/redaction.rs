@@ -180,34 +180,6 @@ fn percent_encode(text: &str) -> String {
     output
 }
 
-/// End of the value run that starts at `start`.
-///
-/// A run stops at a pair separator (`&`), at a fragment (`#`), at a
-/// percent-encoded separator (`%26`), or at the end of the text.
-/// Offset of the next absolute-URL scheme, searched from `from`.
-fn next_scheme(haystack: &str, from: usize) -> Option<usize> {
-    let tail = &haystack[from..];
-    tail.find("http://")
-        .into_iter()
-        .chain(tail.find("https://"))
-        .min()
-}
-
-/// End of a URL token in prose: whitespace, or punctuation that closes it.
-fn url_token_end(text: &str, start: usize) -> usize {
-    let closes = |character: char| {
-        character.is_whitespace()
-            || matches!(
-                character,
-                ',' | ';' | ')' | ']' | '}' | '>' | '<' | '"' | '\'' | '|'
-            )
-    };
-    text[start..]
-        .char_indices()
-        .find(|(_, character)| closes(*character))
-        .map_or(text.len(), |(offset, _)| start + offset)
-}
-
 /// Byte offsets that end a query-value run: a literal `&` or `#`, and their
 /// percent-encoded spelling `%26`.
 ///
@@ -553,28 +525,26 @@ impl RedactionPolicy {
         Some(output)
     }
 
-    /// Masks sensitive parameters in absolute URLs embedded in free text: only
-    /// the credential run is replaced, up to the punctuation that ends a URL.
-    fn mask_urls_in_text(&self, text: &str) -> Option<String> {
+    /// `true` when the text names a configured sensitive parameter.
+    ///
+    /// Free text cannot be rewritten safely: there is no way to tell where a URL
+    /// ends and the prose around it begins, so masking it either eats the prose
+    /// or leaves the credential behind. A body that mentions one of these
+    /// parameters is withheld instead of rewritten.
+    fn text_carries_credential(&self, text: &str) -> bool {
         let haystack = text.to_ascii_lowercase();
-        let mut output = String::with_capacity(text.len());
-        let mut changed = false;
-        let mut cursor = 0;
-        while let Some(offset) = next_scheme(&haystack, cursor) {
-            let start = cursor + offset;
-            let end = url_token_end(text, start);
-            output.push_str(&text[cursor..start]);
-            match self.mask_url_text(&text[start..end]) {
-                Some(masked) => {
-                    output.push_str(&masked);
-                    changed = true;
-                }
-                None => output.push_str(&text[start..end]),
-            }
-            cursor = end;
-        }
-        output.push_str(&text[cursor..]);
-        changed.then_some(output)
+        self.query_params.iter().any(|name| {
+            let name = name.to_ascii_lowercase();
+            let encoded = percent_encode(&name).to_ascii_lowercase();
+            [
+                format!("{name}="),
+                format!("{name}%3d"),
+                format!("{name}[]="),
+                format!("{encoded}%3d"),
+            ]
+            .iter()
+            .any(|pattern| haystack.contains(pattern.as_str()))
+        })
     }
 
     /// Recursively masks configured field names in a JSON document.
@@ -646,17 +616,13 @@ impl RedactionPolicy {
             .is_some_and(super::http::ContentType::is_json)
             || text.trim_start().starts_with('{')
             || text.trim_start().starts_with('[');
-        // Anything that is not a form or a JSON document is still scanned for
-        // absolute URLs: only the credential run inside the URL is replaced, so
-        // the prose around it survives untouched.
+        // A plain-text body is never rewritten: masking it means guessing where
+        // a URL ends, and both guesses are wrong somewhere. If it mentions a
+        // configured parameter the payload is withheld instead.
         if !looks_json {
-            if let Some(masked) = self.mask_urls_in_text(&text)
-                && let BodyData::Captured { bytes } = &mut body.data
-            {
-                let length = u64::try_from(masked.len()).unwrap_or(u64::MAX);
-                body.size_bytes = body.size_bytes.max(length);
-                *bytes = masked.into_bytes();
-                report.query_values += 1;
+            if body.bytes().is_some() && self.text_carries_credential(&text) {
+                body.redact();
+                report.bodies += 1;
             }
             return;
         }
@@ -924,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn form_bodies_and_plain_text_urls_are_masked_without_touching_prose() {
+    fn form_bodies_are_masked_and_plain_text_is_withheld_when_sensitive() {
         let policy = RedactionPolicy::default();
         let mut report = RedactionReport::default();
         let mut form = Body::captured(
@@ -938,42 +904,45 @@ mod tests {
         assert!(text.contains("user=ana") && text.contains("page=2"));
         assert_eq!(report.query_values, 1);
 
-        // A plain-text body keeps its prose: only the credential run inside the
-        // URL is replaced, never the marks and the words after it.
+        // A plain-text body that names a credential is withheld, not rewritten:
+        // no rewrite keeps the prose and hides the secret at the same time.
         let mut plain = Body::captured(
             Some(ContentType::parse("text/plain")),
             b"see https://api.test/x?token=TXT1,for details".to_vec(),
         );
         policy.redact_body(&mut plain, &mut report);
-        assert_eq!(
-            plain.text().unwrap(),
-            "see https://api.test/x?token=[REDACTED],for details"
-        );
-        assert_eq!(report.query_values, 2);
+        assert!(plain.text().is_none(), "the body has to be withheld");
+        assert!(plain.bytes().is_none());
+        assert_eq!(report.bodies, 1);
 
-        // Text without a URL is left exactly as captured.
+        // Text that names nothing sensitive is left exactly as captured.
         let mut prose = Body::captured(
             Some(ContentType::parse("text/plain")),
-            b"plain note: forget-me-not".to_vec(),
+            b"plain note: forget-me-not, with (parentheses)".to_vec(),
         );
         policy.redact_body(&mut prose, &mut report);
-        assert_eq!(prose.text().unwrap(), "plain note: forget-me-not");
-        assert_eq!(report.query_values, 2);
+        assert_eq!(
+            prose.text().unwrap(),
+            "plain note: forget-me-not, with (parentheses)"
+        );
+        assert_eq!(report.bodies, 1);
     }
 
     #[test]
-    fn many_urls_in_plain_text_are_masked_linearly() {
+    fn a_huge_plain_text_body_is_scanned_once() {
         let policy = RedactionPolicy::default();
         let mut report = RedactionReport::default();
-        let body: String = (0..5_000)
-            .map(|index| format!(" see https://api.test/x?token=V{index},done;"))
-            .collect();
+        let body: String = (0..20_000)
+            .map(|index| format!(" see https://api.test/x?id={index},done;"))
+            .collect::<String>()
+            + " token=LAST";
         let mut plain = Body::captured(Some(ContentType::parse("text/plain")), body.into_bytes());
         policy.redact_body(&mut plain, &mut report);
-        let text = plain.text().unwrap();
-        assert!(!text.contains("V0,") && !text.contains("V4999,"));
-        assert_eq!(text.matches(REDACTION_MARKER).count(), 5_000);
-        assert_eq!(text.matches(",done;").count(), 5_000, "the prose was eaten");
+        assert!(
+            plain.text().is_none(),
+            "the credential at the tail is withheld"
+        );
+        assert_eq!(report.bodies, 1);
     }
 
     #[test]
