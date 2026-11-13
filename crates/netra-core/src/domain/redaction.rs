@@ -180,6 +180,25 @@ fn percent_encode(text: &str) -> String {
     output
 }
 
+/// Every spelling a configured sensitive parameter can take in a raw value:
+/// plain, `[]` array form, and their percent-encoded spellings.
+///
+/// One source of truth on purpose. The masking path and the plain-text
+/// withholding check must recognise exactly the same set, or a spelling slips
+/// past one of them and reaches the store.
+fn sensitive_param_patterns(name: &str) -> [String; 6] {
+    let name = name.to_ascii_lowercase();
+    let encoded = percent_encode(&name).to_ascii_lowercase();
+    [
+        format!("{name}="),
+        format!("{name}[]="),
+        format!("{name}%3d"),
+        format!("{name}%5b%5d%3d"),
+        format!("{encoded}%3d"),
+        format!("{encoded}="),
+    ]
+}
+
 /// Byte offsets that end a query-value run: a literal `&` or `#`, and their
 /// percent-encoded spelling `%26`.
 ///
@@ -475,18 +494,7 @@ impl RedactionPolicy {
         let terminators = run_terminators(&haystack);
         let mut runs: Vec<(usize, usize)> = Vec::new();
         for name in &self.query_params {
-            let name = name.to_ascii_lowercase();
-            let encoded = percent_encode(&name).to_ascii_lowercase();
-            // Plain, `[]` array form, and their percent-encoded spellings.
-            let patterns = [
-                format!("{name}="),
-                format!("{name}[]="),
-                format!("{name}%3d"),
-                format!("{name}%5b%5d%3d"),
-                format!("{encoded}%3d"),
-                format!("{encoded}="),
-            ];
-            for pattern in &patterns {
+            for pattern in sensitive_param_patterns(name) {
                 // The cursor keeps the scan moving forward: masking rewrites
                 // the value but leaves the pattern in front of it, so a scan
                 // that restarted from the beginning would rewrite that same
@@ -534,16 +542,9 @@ impl RedactionPolicy {
     fn text_carries_credential(&self, text: &str) -> bool {
         let haystack = text.to_ascii_lowercase();
         self.query_params.iter().any(|name| {
-            let name = name.to_ascii_lowercase();
-            let encoded = percent_encode(&name).to_ascii_lowercase();
-            [
-                format!("{name}="),
-                format!("{name}%3d"),
-                format!("{name}[]="),
-                format!("{encoded}%3d"),
-            ]
-            .iter()
-            .any(|pattern| haystack.contains(pattern.as_str()))
+            sensitive_param_patterns(name)
+                .iter()
+                .any(|pattern| haystack.contains(pattern.as_str()))
         })
     }
 
@@ -926,6 +927,26 @@ mod tests {
             "plain note: forget-me-not, with (parentheses)"
         );
         assert_eq!(report.bodies, 1);
+    }
+
+    #[test]
+    fn every_encoded_spelling_withholds_a_plain_text_body() {
+        let policy = RedactionPolicy::default();
+        for spelling in [
+            "token=PLAIN1",
+            "token%3DENC1",
+            "token%5B%5D%3DARR1",
+            "token%5b%5d%3dLOW1",
+        ] {
+            let mut report = RedactionReport::default();
+            let mut plain = Body::captured(
+                Some(ContentType::parse("text/plain")),
+                format!("note {spelling} tail").into_bytes(),
+            );
+            policy.redact_body(&mut plain, &mut report);
+            assert!(plain.text().is_none(), "{spelling} survived");
+            assert_eq!(report.bodies, 1);
+        }
     }
 
     #[test]
