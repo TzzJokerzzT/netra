@@ -17,6 +17,7 @@ pub const APP_DIR_NAME: &str = "netra";
 
 /// Size limits applied while capturing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CaptureLimits {
     /// Maximum stored bytes per payload; larger payloads are truncated.
     pub max_body_bytes: usize,
@@ -38,6 +39,7 @@ impl Default for CaptureLimits {
 
 /// Proxy listener settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProxySettings {
     /// Bind address. Loopback by default; exposing the proxy requires intent.
     pub bind_addr: String,
@@ -282,6 +284,33 @@ mod tests {
         assert!(!config.proxy.intercept_tls);
         assert!(config.limits.max_body_bytes > 0);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_partial_proxy_block_decodes_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // The README tells users to add this single line.
+        fs::write(&path, r#"{"proxy":{"intercept_tls":true}}"#).unwrap();
+        let config = NetraConfig::load_or_default(&path).unwrap();
+        assert!(config.proxy.intercept_tls);
+        assert_eq!(config.proxy.bind_addr, "127.0.0.1");
+        assert_eq!(config.proxy.port, 8080);
+        assert_eq!(config.proxy.max_connections, 64);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_partial_limits_block_decodes_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"limits":{"max_body_bytes":2048}}"#).unwrap();
+        let config = NetraConfig::load_or_default(&path).unwrap();
+        assert_eq!(config.limits.max_body_bytes, 2048);
+        assert_eq!(
+            config.limits.max_headers_per_side,
+            CaptureLimits::default().max_headers_per_side
+        );
     }
 
     #[test]
