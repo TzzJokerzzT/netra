@@ -23,6 +23,12 @@ pub enum Incoming {
         method: String,
         /// Event parameters.
         params: Value,
+        /// Flat-session id from the message envelope, when the frame carried one.
+        ///
+        /// CDP puts it beside `method` and `params`, never inside `params`: the
+        /// `sessionId` a `Target.*` payload carries names the target being
+        /// attached, not the session the frame arrived on.
+        session: Option<String>,
     },
 }
 
@@ -62,6 +68,10 @@ pub fn parse_incoming(frame: &str) -> Result<Incoming, ProtocolError> {
         Some(method) => Ok(Incoming::Event {
             method: method.to_owned(),
             params: value.get("params").cloned().unwrap_or(Value::Null),
+            session: value
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         }),
         None => Err(ProtocolError::Unexpected(frame.chars().take(120).collect())),
     }
@@ -113,10 +123,27 @@ mod tests {
     fn parses_an_event_and_tolerates_unknown_fields() {
         let frame = r#"{"method":"Network.loadingFinished","params":{"requestId":"1","encodedDataLength":12},"sessionId":"abc","futureField":true}"#;
         match parse_incoming(frame).unwrap() {
-            Incoming::Event { method, params } => {
+            Incoming::Event {
+                method,
+                params,
+                session,
+            } => {
                 assert_eq!(method, "Network.loadingFinished");
                 assert_eq!(params["requestId"], "1");
+                assert_eq!(session.as_deref(), Some("abc"));
             }
+            other => panic!("expected an event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_event_without_an_envelope_session_carries_none() {
+        let frame = r#"{"method":"Target.targetInfoChanged","params":{"sessionId":"payload"}}"#;
+        match parse_incoming(frame).unwrap() {
+            Incoming::Event { session, .. } => assert!(
+                session.is_none(),
+                "a `sessionId` inside `params` names the payload, not the envelope"
+            ),
             other => panic!("expected an event, got {other:?}"),
         }
     }

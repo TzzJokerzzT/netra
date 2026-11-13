@@ -293,6 +293,9 @@ fn open_tab(port: u16, url: &str) {
     );
 }
 
+/// One captured exchange: its key, and the response body text seen for it.
+type CapturedExchange = (SourceKey, Option<String>);
+
 #[tokio::test]
 async fn captures_response_bodies_from_a_second_tab() {
     let Some(binary) = chromium_binary() else {
@@ -318,13 +321,14 @@ async fn captures_response_bodies_from_a_second_tab() {
     // the body round trip.
     open_tab(debugging_port, &fixture.url_for("second-tab.json"));
 
-    let mut outcome: Option<Vec<(SourceKey, Option<String>)>> = None;
+    let mut outcome: Option<(String, Vec<CapturedExchange>)> = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut attempt = 0_u32;
     while tokio::time::Instant::now() < deadline {
         attempt += 1;
         // A fresh path per attempt keeps the browser from answering from a cache.
         let marker = format!("/two-tabs-{attempt}.json");
+        let marker_name = marker.trim_start_matches('/').to_owned();
         let target = fixture.url_for(marker.trim_start_matches('/'));
         provider
             .navigate(&target)
@@ -359,12 +363,13 @@ async fn captures_response_bodies_from_a_second_tab() {
             }
         }
         if exchanges.len() >= 2 && exchanges.iter().all(|(_, body)| body.is_some()) {
-            outcome = Some(
+            outcome = Some((
+                marker_name.clone(),
                 exchanges
                     .into_iter()
                     .map(|(key, body)| (key, body.flatten()))
                     .collect(),
-            );
+            ));
             break;
         }
     }
@@ -373,7 +378,7 @@ async fn captures_response_bodies_from_a_second_tab() {
     let _ = browser.child.wait();
     drop(fixture);
 
-    let Some(exchanges) = outcome else {
+    let Some((marker, exchanges)) = outcome else {
         panic!("two attached tabs never produced one completed exchange each");
     };
     let omitted: Vec<&SourceKey> = exchanges
@@ -392,6 +397,13 @@ async fn captures_response_bodies_from_a_second_tab() {
         assert!(
             text.contains("netra-fixture"),
             "the body for {key} must carry the fixture payload, got {text:?}"
+        );
+        // The fixture echoes the path it was asked for, so a body echoing its own
+        // request's path proves it was fetched on the session that observed that
+        // request rather than on another attached tab's session.
+        assert!(
+            text.contains(&marker),
+            "the body for {key} must belong to the exchange that requested {marker}, got {text:?}"
         );
     }
 }
