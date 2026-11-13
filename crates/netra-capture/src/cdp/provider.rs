@@ -292,6 +292,8 @@ impl CdpCaptureProvider {
             let Some(frame) = self.read_frame().await? else {
                 return Err(CaptureError::StreamClosed);
             };
+            // The flat-session id is on the message envelope, not in `params`.
+            let session = envelope_session(&frame);
             match parse_incoming(&frame).map_err(|error| CaptureError::Source(error.to_string()))? {
                 Incoming::Response {
                     id: answered,
@@ -307,7 +309,8 @@ impl CdpCaptureProvider {
                     self.handle_body_response(id, result, error);
                 }
                 Incoming::Event { method, params } => {
-                    self.handle_event(&method, &params).await?;
+                    self.handle_event(&method, &params, session.as_deref())
+                        .await?;
                 }
             }
         }
@@ -349,7 +352,17 @@ impl CdpCaptureProvider {
     }
 
     /// Translates one CDP event and queues what it produces.
-    async fn handle_event(&mut self, method: &str, params: &Value) -> Result<(), CaptureError> {
+    ///
+    /// `session` is the flat-session id carried by the message envelope: a body
+    /// command belongs to the session that observed the response, so a session
+    /// id read from `params` (which only `Target.*` events carry) cannot stand in
+    /// for it.
+    async fn handle_event(
+        &mut self,
+        method: &str,
+        params: &Value,
+        session: Option<&str>,
+    ) -> Result<(), CaptureError> {
         match method {
             "Target.attachedToTarget" => {
                 let is_page = params
@@ -395,7 +408,6 @@ impl CdpCaptureProvider {
         }
 
         let request_id = params.get("requestId").and_then(Value::as_str);
-        let session = params.get("sessionId").and_then(Value::as_str);
         let key = request_id.map(|id| SourceKey::new(CaptureSource::Cdp, id));
 
         if method == "Network.requestWillBeSent"
@@ -600,16 +612,33 @@ impl CaptureProvider for CdpCaptureProvider {
             let Some(frame) = self.read_frame().await? else {
                 return self.reconnect().await;
             };
+            // The flat-session id is on the message envelope, not in `params`.
+            let session = envelope_session(&frame);
             match parse_incoming(&frame).map_err(|error| CaptureError::Source(error.to_string()))? {
                 Incoming::Response { id, result, error } => {
                     self.handle_body_response(id, result, error);
                 }
                 Incoming::Event { method, params } => {
-                    self.handle_event(&method, &params).await?;
+                    self.handle_event(&method, &params, session.as_deref())
+                        .await?;
                 }
             }
         }
     }
+}
+
+/// Reads the flat-session id from a CDP message envelope.
+///
+/// CDP puts `sessionId` beside `method` and `params`, not inside the event
+/// parameters, so it has to be taken from the frame itself. Only `Target.*`
+/// events carry a `sessionId` *payload* field, and that one names the target
+/// being attached or detached, not the session the frame arrived on.
+fn envelope_session(frame: &str) -> Option<String> {
+    serde_json::from_str::<Value>(frame)
+        .ok()?
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// Decodes a `Network.getResponseBody` answer into a payload.

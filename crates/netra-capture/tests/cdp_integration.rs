@@ -15,12 +15,14 @@ use std::{
 
 use netra_capture::cdp::{CdpCaptureProvider, discovery::CdpEndpoint};
 use netra_core::{
-    domain::{CaptureEvent, CaptureSource, ExchangeState},
+    domain::{CaptureEvent, CaptureSource, ExchangeState, SourceKey},
     ports::CaptureProvider,
 };
 
-/// Minimal HTTP fixture: answers every request with a JSON document until it is
-/// told to stop, so the test never waits for connections that will not happen.
+/// Minimal HTTP fixture: answers every request with a JSON document that echoes
+/// the requested path, until it is told to stop, so a captured body identifies
+/// the exchange that produced it and the test never waits for connections that
+/// will not happen.
 struct Fixture {
     port: u16,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -41,14 +43,22 @@ impl Fixture {
                     Ok((mut stream, _)) => {
                         let _ = stream.set_nonblocking(false);
                         let mut buffer = [0u8; 2048];
-                        let _ = stream.read(&mut buffer);
-                        let body = br#"{"service":"netra-fixture","ok":true}"#;
+                        let read = stream.read(&mut buffer).unwrap_or(0);
+                        let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                        let path = request
+                            .lines()
+                            .next()
+                            .and_then(|line| line.split_whitespace().nth(1))
+                            .unwrap_or("/")
+                            .to_owned();
+                        let body =
+                            format!(r#"{{"service":"netra-fixture","path":"{path}","ok":true}}"#);
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
                         let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.write_all(body);
+                        let _ = stream.write_all(body.as_bytes());
                         let _ = stream.flush();
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -70,6 +80,11 @@ impl Fixture {
             "http://127.0.0.1:{}/fixture.json?token=fixture-secret",
             self.port
         )
+    }
+
+    /// URL for another path on the same fixture, used to identify a second tab.
+    fn url_for(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}/{path}?token=fixture-secret", self.port)
     }
 }
 
@@ -240,6 +255,145 @@ async fn captures_a_real_chromium_request_with_body_and_timings() {
     assert!(body_seen, "the response body must be captured");
     assert_eq!(ExchangeState::Completed.as_str(), "completed");
     let _ = saw_timing;
+}
+
+/// Opens a second page in the running browser through the debugging endpoint.
+///
+/// `/json/new` is a `PUT`; the crate keeps a minimal HTTP client for discovery,
+/// so the test speaks HTTP/1.1 directly instead of pulling in a client stack.
+fn open_tab(port: u16, url: &str) {
+    use std::io::{Read as _, Write as _};
+
+    let address = format!("127.0.0.1:{port}");
+    let mut stream = std::net::TcpStream::connect(&address)
+        .expect("the browser debugging port must accept a tab request");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let request = format!(
+        "PUT /json/new?{url} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.flush().unwrap();
+    // The browser keeps the connection open, so the answer is delimited by its
+    // headers instead of by EOF.
+    let mut raw: Vec<u8> = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 1024];
+    while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => raw.extend_from_slice(&chunk[..read]),
+            Err(error) => panic!("the browser did not answer the tab request: {error}"),
+        }
+    }
+    let head = String::from_utf8_lossy(&raw);
+    assert!(
+        head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200"),
+        "the browser refused to open a second tab: {head}"
+    );
+}
+
+#[tokio::test]
+async fn captures_response_bodies_from_a_second_tab() {
+    let Some(binary) = chromium_binary() else {
+        eprintln!("netra: no Chromium binary found; skipping the CDP integration test");
+        return;
+    };
+    let fixture = Fixture::start();
+    let debugging_port = free_port();
+    let url = fixture.origin();
+    let mut browser = spawn_chromium(&binary, debugging_port, &url);
+    wait_for_endpoint(debugging_port);
+
+    let mut provider = CdpCaptureProvider::new(CdpEndpoint::new("127.0.0.1", debugging_port));
+    provider
+        .start()
+        .await
+        .expect("the provider must attach to Chromium");
+
+    // A second tab gets its own flat session, so capture spans two sessions from
+    // here on. `navigate` reaches every attached session, so navigating a fresh
+    // marker path produces one exchange per attached tab: two captured bodies for
+    // the same path can only come from two sessions, and each of them must survive
+    // the body round trip.
+    open_tab(debugging_port, &fixture.url_for("second-tab.json"));
+
+    let mut outcome: Option<Vec<(SourceKey, Option<String>)>> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut attempt = 0_u32;
+    while tokio::time::Instant::now() < deadline {
+        attempt += 1;
+        // A fresh path per attempt keeps the browser from answering from a cache.
+        let marker = format!("/two-tabs-{attempt}.json");
+        let target = fixture.url_for(marker.trim_start_matches('/'));
+        provider
+            .navigate(&target)
+            .await
+            .expect("both tabs must accept a navigation");
+
+        // `None` inside the tuple means "body not seen yet"; `Some(None)` means the
+        // body event arrived without a payload, which is the defect under test.
+        let mut exchanges: Vec<(SourceKey, Option<Option<String>>)> = Vec::new();
+        let round_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < round_deadline {
+            match tokio::time::timeout(Duration::from_millis(500), provider.next_event()).await {
+                Ok(Ok(Some(CaptureEvent::RequestStarted { key, request }))) => {
+                    if request.url.as_str().contains(&marker)
+                        && !exchanges.iter().any(|(seen, _)| *seen == key)
+                    {
+                        exchanges.push((key, None));
+                    }
+                }
+                Ok(Ok(Some(CaptureEvent::BodyUpdated { key, body, .. }))) => {
+                    if let Some((_, slot)) = exchanges.iter_mut().find(|(seen, _)| *seen == key) {
+                        *slot = Some(body.text());
+                    }
+                }
+                Ok(Ok(Some(_))) => {}
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => panic!("capture failed: {error}"),
+                Err(_) => {}
+            }
+            if exchanges.len() >= 2 && exchanges.iter().all(|(_, body)| body.is_some()) {
+                break;
+            }
+        }
+        if exchanges.len() >= 2 && exchanges.iter().all(|(_, body)| body.is_some()) {
+            outcome = Some(
+                exchanges
+                    .into_iter()
+                    .map(|(key, body)| (key, body.flatten()))
+                    .collect(),
+            );
+            break;
+        }
+    }
+    let _ = provider.stop().await;
+    let _ = browser.child.kill();
+    let _ = browser.child.wait();
+    drop(fixture);
+
+    let Some(exchanges) = outcome else {
+        panic!("two attached tabs never produced one completed exchange each");
+    };
+    let omitted: Vec<&SourceKey> = exchanges
+        .iter()
+        .filter(|(_, body)| body.is_none())
+        .map(|(key, _)| key)
+        .collect();
+    assert!(
+        omitted.is_empty(),
+        "{} of {} response bodies were omitted instead of captured: {omitted:?}",
+        omitted.len(),
+        exchanges.len()
+    );
+    for (key, body) in &exchanges {
+        let text = body.as_deref().unwrap_or_default();
+        assert!(
+            text.contains("netra-fixture"),
+            "the body for {key} must carry the fixture payload, got {text:?}"
+        );
+    }
 }
 
 #[tokio::test]
