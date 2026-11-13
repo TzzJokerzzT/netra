@@ -55,9 +55,11 @@ stored, already-redacted rows.
   body, is not recognised. Use `"capture_bodies": false` when capturing
   authentication flows you do not want on disk.
 - Form-encoded bodies (`application/x-www-form-urlencoded`) are scanned like a
-  query string, and URL-shaped tokens inside a plain-text body are masked. A
+  query string. In a **plain-text** body only absolute URLs are scanned, and the
+  credential run stops at the punctuation that closes a URL in prose, so a value
+  that itself contains `,` or `;` keeps the tail after that character on disk. A
   credential in an arbitrary text shape (a `token: abc` log line, a multipart
-  part) is still not recognised.
+  part) is not recognised.
 - A credential inside a non-standard header (`x-my-token`) is not recognised
   unless it is added to the rule list. The defaults cover `authorization`,
   `proxy-authorization`, `cookie`, `set-cookie`, `api-key`, `authentication`,

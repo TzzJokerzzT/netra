@@ -180,6 +180,57 @@ fn percent_encode(text: &str) -> String {
     output
 }
 
+/// End of the value run that starts at `start`.
+///
+/// A run stops at a pair separator (`&`), at a fragment (`#`), at a
+/// percent-encoded separator (`%26`), or at the end of the text.
+/// Offset of the next absolute-URL scheme, searched from `from`.
+fn next_scheme(haystack: &str, from: usize) -> Option<usize> {
+    let tail = &haystack[from..];
+    tail.find("http://")
+        .into_iter()
+        .chain(tail.find("https://"))
+        .min()
+}
+
+/// End of a URL token in prose: whitespace, or punctuation that closes it.
+fn url_token_end(text: &str, start: usize) -> usize {
+    let closes = |character: char| {
+        character.is_whitespace()
+            || matches!(
+                character,
+                ',' | ';' | ')' | ']' | '}' | '>' | '<' | '"' | '\'' | '|'
+            )
+    };
+    text[start..]
+        .char_indices()
+        .find(|(_, character)| closes(*character))
+        .map_or(text.len(), |(offset, _)| start + offset)
+}
+
+/// Byte offsets that end a query-value run: a literal `&` or `#`, and their
+/// percent-encoded spelling `%26`.
+///
+/// Precomputing them once keeps every run lookup logarithmic. Scanning the
+/// remaining value per run made hostile input quadratic even though the
+/// pattern search itself was linear.
+fn run_terminators(haystack: &str) -> Vec<usize> {
+    let mut positions: Vec<usize> = haystack
+        .bytes()
+        .enumerate()
+        .filter(|(_, byte)| *byte == b'&' || *byte == b'#')
+        .map(|(index, _)| index)
+        .collect();
+    let mut cursor = 0;
+    while let Some(offset) = haystack[cursor..].find("%26") {
+        let index = cursor + offset;
+        positions.push(index);
+        cursor = index + 3;
+    }
+    positions.sort_unstable();
+    positions
+}
+
 fn extend_case_insensitive(target: &mut Vec<String>, defaults: &[&str]) {
     for default in defaults {
         if !target.iter().any(|rule| rule.eq_ignore_ascii_case(default)) {
@@ -435,79 +486,94 @@ impl RedactionPolicy {
 
     /// Masks sensitive parameters inside a nested URL that a value contains.
     ///
-    /// Works on the raw text (not decoded) so the surrounding value keeps its
-    /// representation: only the credential runs are replaced.
+    /// The input is the query value exactly as the caller holds it: decoded by
+    /// `form_urlencoded` in [`RedactionPolicy::redact_url`], still encoded in
+    /// [`RedactionPolicy::mask_query_params`]. Both spellings of every pattern
+    /// are therefore searched, and only the credential runs are replaced so the
+    /// surrounding value keeps its representation.
+    ///
+    /// One lowercased copy of the value is built and every pattern is searched
+    /// in it, so the work is linear in the value length regardless of how many
+    /// runs it carries; the output is rebuilt in a single pass.
     fn mask_nested_text(&self, value: &str) -> Option<String> {
-        let mut text = value.to_owned();
-        let mut changed = false;
+        if value.is_empty() {
+            return None;
+        }
+        let haystack = value.to_ascii_lowercase();
+        let terminators = run_terminators(&haystack);
+        let mut runs: Vec<(usize, usize)> = Vec::new();
         for name in &self.query_params {
+            let name = name.to_ascii_lowercase();
+            let encoded = percent_encode(&name).to_ascii_lowercase();
             // Plain, `[]` array form, and their percent-encoded spellings.
-            let mut patterns = vec![
+            let patterns = [
                 format!("{name}="),
                 format!("{name}[]="),
-                format!("{name}%3D"),
-                format!("{name}%5B%5D%3D"),
+                format!("{name}%3d"),
+                format!("{name}%5b%5d%3d"),
+                format!("{encoded}%3d"),
+                format!("{encoded}="),
             ];
-            let encoded = percent_encode(name);
-            patterns.push(format!("{encoded}%3D"));
-            patterns.push(format!("{encoded}="));
-            for pattern in patterns {
-                // The cursor keeps the scan moving forward. Masking rewrites
+            for pattern in &patterns {
+                // The cursor keeps the scan moving forward: masking rewrites
                 // the value but leaves the pattern in front of it, so a scan
                 // that restarted from the beginning would rewrite that same
                 // run until the process died.
                 let mut cursor = 0;
-                while let Some(offset) = find_ignore_ascii_case(&text[cursor..], &pattern) {
+                while let Some(offset) = haystack[cursor..].find(pattern.as_str()) {
                     let start = cursor + offset + pattern.len();
-                    let end = text[start..]
-                        .find(['&', '#'])
-                        .map_or(text.len(), |offset| start + offset);
-                    let end = text[start..end]
-                        .find("%26")
-                        .map_or(end, |offset| start + offset);
-                    if start == end {
-                        break;
-                    }
-                    if text[start..end] == self.replacement {
-                        cursor = end;
+                    let end = terminators
+                        .get(terminators.partition_point(|position| *position < start))
+                        .copied()
+                        .unwrap_or(value.len());
+                    cursor = end.max(start);
+                    if start == end || value[start..end] == self.replacement {
                         continue;
                     }
-                    text.replace_range(start..end, &self.replacement);
-                    changed = true;
-                    cursor = start + self.replacement.len();
+                    runs.push((start, end));
                 }
             }
         }
-        changed.then_some(text)
+        if runs.is_empty() {
+            return None;
+        }
+        runs.sort_unstable();
+        let mut output = String::with_capacity(value.len());
+        let mut cursor = 0;
+        for (start, end) in runs {
+            // A run nested inside an already masked one adds nothing.
+            if start < cursor {
+                continue;
+            }
+            output.push_str(&value[cursor..start]);
+            output.push_str(&self.replacement);
+            cursor = end;
+        }
+        output.push_str(&value[cursor..]);
+        Some(output)
     }
 
-    /// Masks every URL-shaped token inside free text, keeping the layout.
+    /// Masks sensitive parameters in absolute URLs embedded in free text: only
+    /// the credential run is replaced, up to the punctuation that ends a URL.
     fn mask_urls_in_text(&self, text: &str) -> Option<String> {
+        let haystack = text.to_ascii_lowercase();
         let mut output = String::with_capacity(text.len());
-        let mut token = String::new();
         let mut changed = false;
-        let flush = |output: &mut String, token: &mut String, changed: &mut bool| {
-            if token.is_empty() {
-                return;
-            }
-            match self.mask_url_text(token) {
+        let mut cursor = 0;
+        while let Some(offset) = next_scheme(&haystack, cursor) {
+            let start = cursor + offset;
+            let end = url_token_end(text, start);
+            output.push_str(&text[cursor..start]);
+            match self.mask_url_text(&text[start..end]) {
                 Some(masked) => {
                     output.push_str(&masked);
-                    *changed = true;
+                    changed = true;
                 }
-                None => output.push_str(token),
+                None => output.push_str(&text[start..end]),
             }
-            token.clear();
-        };
-        for character in text.chars() {
-            if character.is_whitespace() {
-                flush(&mut output, &mut token, &mut changed);
-                output.push(character);
-            } else {
-                token.push(character);
-            }
+            cursor = end;
         }
-        flush(&mut output, &mut token, &mut changed);
+        output.push_str(&text[cursor..]);
         changed.then_some(output)
     }
 
@@ -580,8 +646,10 @@ impl RedactionPolicy {
             .is_some_and(super::http::ContentType::is_json)
             || text.trim_start().starts_with('{')
             || text.trim_start().starts_with('[');
+        // Anything that is not a form or a JSON document is still scanned for
+        // absolute URLs: only the credential run inside the URL is replaced, so
+        // the prose around it survives untouched.
         if !looks_json {
-            // Plain text can still carry a URL with a credential.
             if let Some(masked) = self.mask_urls_in_text(&text)
                 && let BodyData::Captured { bytes } = &mut body.data
             {
@@ -856,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn form_bodies_and_plain_text_urls_are_masked() {
+    fn form_bodies_and_plain_text_urls_are_masked_without_touching_prose() {
         let policy = RedactionPolicy::default();
         let mut report = RedactionReport::default();
         let mut form = Body::captured(
@@ -865,17 +933,84 @@ mod tests {
         );
         policy.redact_body(&mut form, &mut report);
         let text = form.text().unwrap();
+        assert_eq!(text, "user=ana&token=[REDACTED]&page=2");
         assert!(!text.contains("FORM1"), "{text}");
         assert!(text.contains("user=ana") && text.contains("page=2"));
+        assert_eq!(report.query_values, 1);
 
+        // A plain-text body keeps its prose: only the credential run inside the
+        // URL is replaced, never the marks and the words after it.
         let mut plain = Body::captured(
             Some(ContentType::parse("text/plain")),
-            b"see https://api.test/x?token=TXT1 for details".to_vec(),
+            b"see https://api.test/x?token=TXT1,for details".to_vec(),
         );
         policy.redact_body(&mut plain, &mut report);
+        assert_eq!(
+            plain.text().unwrap(),
+            "see https://api.test/x?token=[REDACTED],for details"
+        );
+        assert_eq!(report.query_values, 2);
+
+        // Text without a URL is left exactly as captured.
+        let mut prose = Body::captured(
+            Some(ContentType::parse("text/plain")),
+            b"plain note: forget-me-not".to_vec(),
+        );
+        policy.redact_body(&mut prose, &mut report);
+        assert_eq!(prose.text().unwrap(), "plain note: forget-me-not");
+        assert_eq!(report.query_values, 2);
+    }
+
+    #[test]
+    fn many_urls_in_plain_text_are_masked_linearly() {
+        let policy = RedactionPolicy::default();
+        let mut report = RedactionReport::default();
+        let body: String = (0..5_000)
+            .map(|index| format!(" see https://api.test/x?token=V{index},done;"))
+            .collect();
+        let mut plain = Body::captured(Some(ContentType::parse("text/plain")), body.into_bytes());
+        policy.redact_body(&mut plain, &mut report);
         let text = plain.text().unwrap();
-        assert!(!text.contains("TXT1"), "{text}");
-        assert!(text.contains("for details"), "{text}");
+        assert!(!text.contains("V0,") && !text.contains("V4999,"));
+        assert_eq!(text.matches(REDACTION_MARKER).count(), 5_000);
+        assert_eq!(text.matches(",done;").count(), 5_000, "the prose was eaten");
+    }
+
+    #[test]
+    fn many_repeated_nested_runs_are_masked_linearly() {
+        let policy = RedactionPolicy::default();
+        let runs = 20_000;
+        let mut body = String::from("next=https%3A%2F%2Fevil%2Fcb%3Ftoken%3Dv0");
+        for index in 1..runs {
+            body.push_str(&format!("%26token%3Dv{index}"));
+        }
+        body.push_str("&page=2");
+        let masked = policy
+            .mask_query_params(&body)
+            .expect("the repeated nested tokens are masked");
+        assert_eq!(
+            masked.matches(REDACTION_MARKER).count(),
+            runs,
+            "every run has to be masked"
+        );
+        for index in [0, 1, 9_999, runs - 1] {
+            assert!(
+                !masked.contains(&format!("v{index}")),
+                "run {index} survived"
+            );
+        }
+        assert!(
+            masked.starts_with("next=https%3A%2F%2Fevil%2Fcb%3Ftoken%3D[REDACTED]"),
+            "the nested URL prefix has to be preserved"
+        );
+        assert!(
+            masked.contains("%26token%3D[REDACTED]"),
+            "the encoded separators have to be preserved"
+        );
+        assert!(
+            masked.ends_with("%26token%3D[REDACTED]&page=2"),
+            "unrelated text has to be preserved"
+        );
     }
 
     #[test]
