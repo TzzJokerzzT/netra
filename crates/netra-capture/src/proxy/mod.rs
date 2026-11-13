@@ -205,11 +205,22 @@ impl CaptureProvider for ProxyCaptureProvider {
         let listener_slot = listener;
         let accepting = tokio::spawn(async move {
             loop {
-                let Ok(permit) = Arc::clone(&semaphore).acquire_owned().await else {
-                    return;
-                };
                 match listener_slot.accept().await {
-                    Ok((stream, _peer)) => {
+                    Ok((mut stream, _peer)) => {
+                        // Accept first, then decide: waiting for a permit
+                        // before accepting would stop serving entirely while
+                        // long-lived tunnels hold their slots.
+                        let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned() else {
+                            tokio::spawn(async move {
+                                let _ = stream
+                                    .write_all(
+                                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                    )
+                                    .await;
+                                let _ = stream.shutdown().await;
+                            });
+                            continue;
+                        };
                         let context = Arc::clone(&context);
                         tokio::spawn(async move {
                             if let Err(error) = handle_client(stream, context).await {
@@ -285,11 +296,33 @@ async fn handle_client(stream: TcpStream, context: Arc<HandlerContext>) -> Resul
                 std::io::ErrorKind::TimedOut,
                 "head timeout",
             ))
-        })??;
-    let Some(head) = head else {
-        return Ok(());
+        })?;
+    let head = match head {
+        Ok(Some(head)) => head,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            // A rejected message deserves a status line, not a silent reset.
+            let status = match &error {
+                ProxyError::TooLarge(_) => "431 Request Header Fields Too Large",
+                _ => "400 Bad Request",
+            };
+            let response =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = connection.write_all(response.as_bytes()).await;
+            let _ = connection.shutdown().await;
+            return Err(error);
+        }
     };
-    let request = parse_request_head(&head)?;
+    let request = match parse_request_head(&head) {
+        Ok(request) => request,
+        Err(error) => {
+            let response =
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = connection.write_all(response.as_bytes()).await;
+            let _ = connection.shutdown().await;
+            return Err(error);
+        }
+    };
     if request.is_connect() {
         return handle_connect(connection, request, context).await;
     }
@@ -327,34 +360,75 @@ async fn handle_connect(
     match context.acceptor.clone() {
         None => tunnel(connection, &authority, key, context, started).await,
         Some(acceptor) => {
-            let (stream, buffered) = connection.into_parts();
-            if !buffered.is_empty() {
-                return Err(ProxyError::Refused(
-                    "the client sent TLS data before the tunnel was accepted".to_owned(),
-                ));
+            let outcome =
+                intercept_after_connect(connection, acceptor, host, port, &context, &key).await;
+            let total = started.elapsed_until(Timestamp::now());
+            match outcome {
+                Ok(()) => {
+                    context
+                        .emit(CaptureEvent::RequestCompleted {
+                            key,
+                            timing: Some(TimingMetrics {
+                                total: Some(total),
+                                ..TimingMetrics::default()
+                            }),
+                            response: None,
+                        })
+                        .await;
+                    Ok(())
+                }
+                Err(error) => {
+                    // The CONNECT exchange itself must also stop being pending.
+                    context
+                        .emit(CaptureEvent::RequestFailed {
+                            key,
+                            error: error.to_string(),
+                            timing: None,
+                        })
+                        .await;
+                    Err(error)
+                }
             }
-            context
-                .emit(CaptureEvent::ResponseReceived {
-                    key: key.clone(),
-                    response: intercept_probe_response(),
-                })
-                .await;
-            let mut plain = Connection::new(stream);
-            plain
-                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                .await?;
-            let tls = tokio::time::timeout(context.timeout(), acceptor.accept(stream_of(plain)))
-                .await
-                .map_err(|_| {
-                    ProxyError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "TLS timeout",
-                    ))
-                })?
-                .map_err(ProxyError::Io)?;
-            forward_intercepted(tls, host, port, context).await
         }
     }
+}
+
+/// Acknowledges the tunnel, terminates TLS with the local authority and then
+/// captures the inner HTTP traffic.
+async fn intercept_after_connect(
+    connection: Connection<TcpStream>,
+    acceptor: TlsAcceptor,
+    host: String,
+    port: u16,
+    context: &Arc<HandlerContext>,
+    key: &SourceKey,
+) -> Result<(), ProxyError> {
+    let (stream, buffered) = connection.into_parts();
+    if !buffered.is_empty() {
+        return Err(ProxyError::Refused(
+            "the client sent TLS data before the tunnel was accepted".to_owned(),
+        ));
+    }
+    context
+        .emit(CaptureEvent::ResponseReceived {
+            key: key.clone(),
+            response: intercept_probe_response(),
+        })
+        .await;
+    let mut plain = Connection::new(stream);
+    plain
+        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        .await?;
+    let tls = tokio::time::timeout(context.timeout(), acceptor.accept(stream_of(plain)))
+        .await
+        .map_err(|_| {
+            ProxyError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TLS timeout",
+            ))
+        })?
+        .map_err(ProxyError::Io)?;
+    forward_intercepted(tls, host, port, Arc::clone(context)).await
 }
 
 /// `acceptor.accept` needs the raw stream, not the buffered wrapper.
@@ -478,8 +552,50 @@ async fn forward_one<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let started = Timestamp::now();
     let key = context.next_key();
+    let mut announced = false;
+    let outcome = forward_one_inner(
+        connection,
+        request,
+        context,
+        scheme,
+        connect_override,
+        key.clone(),
+        &mut announced,
+    )
+    .await;
+    match outcome {
+        Ok(delivered) => Ok(delivered),
+        Err(error) => {
+            // An announced exchange must never be left pending: the inspector
+            // would show a request that finished successfully when it did not.
+            if announced {
+                context
+                    .emit(CaptureEvent::RequestFailed {
+                        key,
+                        error: error.to_string(),
+                        timing: None,
+                    })
+                    .await;
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn forward_one_inner<S>(
+    connection: &mut Connection<S>,
+    request: RequestHead,
+    context: &Arc<HandlerContext>,
+    scheme: &str,
+    connect_override: Option<(String, u16)>,
+    key: SourceKey,
+    announced: &mut bool,
+) -> Result<bool, ProxyError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let started = Timestamp::now();
     let limit = context.settings.max_body_bytes;
     let parsed = resolve_target(&request, scheme, connect_override)?;
     let request_body = tokio::time::timeout(
@@ -513,6 +629,7 @@ where
             request: network_request,
         })
         .await;
+    *announced = true;
 
     let ResponseOutcome {
         head,
