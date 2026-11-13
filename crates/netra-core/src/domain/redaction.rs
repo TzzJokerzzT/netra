@@ -18,11 +18,14 @@ pub const REDACTION_MARKER: &str = "[REDACTED]";
 
 /// Header names masked by default.
 pub const DEFAULT_SENSITIVE_HEADERS: &[&str] = &[
+    "api-key",
+    "authentication",
     "authorization",
     "proxy-authorization",
     "cookie",
     "set-cookie",
     "x-api-key",
+    "x-auth",
     "x-auth-token",
     "x-csrf-token",
     "x-xsrf-token",
@@ -107,6 +110,74 @@ fn default_marker() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+/// Decodes percent-encoding (twice), lowercases and drops an array suffix.
+fn normalize_param_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let once = percent_decode(trimmed);
+    let twice = percent_decode(&once);
+    let without_suffix = twice.trim_end_matches("[]").to_owned();
+    without_suffix.to_ascii_lowercase()
+}
+
+/// Splits `name=value`, accepting a percent-encoded separator too.
+fn split_param(pair: &str) -> (&str, Option<&str>) {
+    if let Some((name, value)) = pair.split_once('=') {
+        return (name, Some(value));
+    }
+    if let Some(index) = find_ignore_ascii_case(pair, "%3D") {
+        let (name, value) = pair.split_at(index);
+        return (name, Some(&value[3..]));
+    }
+    (pair, None)
+}
+
+fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
+    let haystack = haystack.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    haystack.find(&needle)
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            output.push(high * 16 + low);
+            index += 3;
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_encode(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            output.push(char::from(byte));
+        } else {
+            output.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    output
 }
 
 fn extend_case_insensitive(target: &mut Vec<String>, defaults: &[&str]) {
@@ -203,9 +274,7 @@ impl RedactionPolicy {
             }
         }
         for entry in headers.iter_mut() {
-            if entry.value.contains("://")
-                && let Some(masked) = self.mask_url_text(&entry.value)
-            {
+            if let Some(masked) = self.mask_url_text(&entry.value) {
                 entry.value = masked;
                 changed += 1;
             }
@@ -232,18 +301,8 @@ impl RedactionPolicy {
             Some((query, fragment)) => (query, format!("#{fragment}")),
             None => (rest, String::new()),
         };
-        let mut changed = false;
-        let masked: Vec<String> = query
-            .split('&')
-            .map(|pair| match pair.split_once('=') {
-                Some((name, _)) if self.is_sensitive_query_param(name) => {
-                    changed = true;
-                    format!("{name}={}", self.replacement)
-                }
-                _ => pair.to_owned(),
-            })
-            .collect();
-        changed.then(|| format!("{head}?{}{tail}", masked.join("&")))
+        self.mask_query_params(query)
+            .map(|masked| format!("{head}?{masked}{tail}"))
     }
 
     /// Masks configured query parameter values in a URL.
@@ -267,10 +326,15 @@ impl RedactionPolicy {
                 if self.is_sensitive_query_param(&name) {
                     changed = true;
                     report.query_values += 1;
-                    (name.into_owned(), self.replacement.clone())
-                } else {
-                    (name.into_owned(), value.into_owned())
+                    return (name.into_owned(), self.replacement.clone());
                 }
+                // A nested URL in a parameter carries its own credentials.
+                if let Some(masked) = self.mask_nested_text(&value) {
+                    changed = true;
+                    report.query_values += 1;
+                    return (name.into_owned(), masked);
+                }
+                (name.into_owned(), value.into_owned())
             })
             .collect();
         if !changed {
@@ -322,11 +386,129 @@ impl RedactionPolicy {
     }
 
     /// `true` when the query parameter is configured as sensitive.
+    ///
+    /// The comparison decodes percent-encoding (twice, because tooling
+    /// double-encodes) and ignores the `[]` array suffix, so `to%6Ben`,
+    /// `token%5B%5D` and `TOKEN` all match `token`.
     #[must_use]
     pub fn is_sensitive_query_param(&self, name: &str) -> bool {
+        let normalized = normalize_param_name(name);
         self.query_params
             .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(name))
+            .any(|candidate| candidate.eq_ignore_ascii_case(&normalized))
+    }
+
+    /// Masks sensitive parameters in a raw query string (`a=1&token=2`).
+    ///
+    /// Returns `Some(masked)` only when something changed.
+    #[must_use]
+    pub fn mask_query_params(&self, query: &str) -> Option<String> {
+        let mut changed = false;
+        let masked: Vec<String> = query
+            .split('&')
+            .map(|pair| {
+                let (name, value) = split_param(pair);
+                if self.is_sensitive_query_param(name) {
+                    changed = true;
+                    return format!("{name}={}", self.replacement);
+                }
+                match value {
+                    Some(value)
+                        if value.contains('?')
+                            || value.contains("%3F")
+                            || value.contains("%3f") =>
+                    {
+                        match self.mask_nested_text(value) {
+                            Some(masked) => {
+                                changed = true;
+                                format!("{name}={masked}")
+                            }
+                            None => pair.to_owned(),
+                        }
+                    }
+                    _ => pair.to_owned(),
+                }
+            })
+            .collect();
+        changed.then(|| masked.join("&"))
+    }
+
+    /// Masks sensitive parameters inside a nested URL that a value contains.
+    ///
+    /// Works on the raw text (not decoded) so the surrounding value keeps its
+    /// representation: only the credential runs are replaced.
+    fn mask_nested_text(&self, value: &str) -> Option<String> {
+        let mut text = value.to_owned();
+        let mut changed = false;
+        for name in &self.query_params {
+            // Plain, `[]` array form, and their percent-encoded spellings.
+            let mut patterns = vec![
+                format!("{name}="),
+                format!("{name}[]="),
+                format!("{name}%3D"),
+                format!("{name}%5B%5D%3D"),
+            ];
+            let encoded = percent_encode(name);
+            patterns.push(format!("{encoded}%3D"));
+            patterns.push(format!("{encoded}="));
+            for pattern in patterns {
+                // The cursor keeps the scan moving forward. Masking rewrites
+                // the value but leaves the pattern in front of it, so a scan
+                // that restarted from the beginning would rewrite that same
+                // run until the process died.
+                let mut cursor = 0;
+                while let Some(offset) = find_ignore_ascii_case(&text[cursor..], &pattern) {
+                    let start = cursor + offset + pattern.len();
+                    let end = text[start..]
+                        .find(['&', '#'])
+                        .map_or(text.len(), |offset| start + offset);
+                    let end = text[start..end]
+                        .find("%26")
+                        .map_or(end, |offset| start + offset);
+                    if start == end {
+                        break;
+                    }
+                    if text[start..end] == self.replacement {
+                        cursor = end;
+                        continue;
+                    }
+                    text.replace_range(start..end, &self.replacement);
+                    changed = true;
+                    cursor = start + self.replacement.len();
+                }
+            }
+        }
+        changed.then_some(text)
+    }
+
+    /// Masks every URL-shaped token inside free text, keeping the layout.
+    fn mask_urls_in_text(&self, text: &str) -> Option<String> {
+        let mut output = String::with_capacity(text.len());
+        let mut token = String::new();
+        let mut changed = false;
+        let flush = |output: &mut String, token: &mut String, changed: &mut bool| {
+            if token.is_empty() {
+                return;
+            }
+            match self.mask_url_text(token) {
+                Some(masked) => {
+                    output.push_str(&masked);
+                    *changed = true;
+                }
+                None => output.push_str(token),
+            }
+            token.clear();
+        };
+        for character in text.chars() {
+            if character.is_whitespace() {
+                flush(&mut output, &mut token, &mut changed);
+                output.push(character);
+            } else {
+                token.push(character);
+            }
+        }
+        flush(&mut output, &mut token, &mut changed);
+        changed.then_some(output)
     }
 
     /// Recursively masks configured field names in a JSON document.
@@ -378,6 +560,20 @@ impl RedactionPolicy {
         let Some(text) = body.text() else {
             return;
         };
+        // URL-encoded forms are query strings in a body.
+        if body.content_type.as_ref().is_some_and(|content_type| {
+            content_type.essence() == "application/x-www-form-urlencoded"
+        }) {
+            if let Some(masked) = self.mask_query_params(&text)
+                && let BodyData::Captured { bytes } = &mut body.data
+            {
+                let length = u64::try_from(masked.len()).unwrap_or(u64::MAX);
+                body.size_bytes = body.size_bytes.max(length);
+                *bytes = masked.into_bytes();
+                report.query_values += 1;
+            }
+            return;
+        }
         let looks_json = body
             .content_type
             .as_ref()
@@ -385,6 +581,15 @@ impl RedactionPolicy {
             || text.trim_start().starts_with('{')
             || text.trim_start().starts_with('[');
         if !looks_json {
+            // Plain text can still carry a URL with a credential.
+            if let Some(masked) = self.mask_urls_in_text(&text)
+                && let BodyData::Captured { bytes } = &mut body.data
+            {
+                let length = u64::try_from(masked.len()).unwrap_or(u64::MAX);
+                body.size_bytes = body.size_bytes.max(length);
+                *bytes = masked.into_bytes();
+                report.query_values += 1;
+            }
             return;
         }
         let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -602,6 +807,75 @@ mod tests {
             headers.get("x-note"),
             Some("https://api.test/x?token=[REDACTED]")
         );
+    }
+
+    #[test]
+    fn query_shapes_that_used_to_slip_through_are_masked() {
+        let policy = RedactionPolicy::default();
+        let mut report = RedactionReport::default();
+        for raw in [
+            "https://api.test/x?token[]=ARR1",
+            "https://api.test/x?ToKeN=MIX1",
+            "https://api.test/x?to%6Ben=ENC1",
+            "https://api.test/x?to%256Ben=DBL1",
+            "https://api.test/x?next=https%3A%2F%2Fevil%2Fcb%3Ftoken%3DNESTEDQ",
+            "https://api.test/x?next=https://evil/cb?token=NESTEDPLAIN",
+        ] {
+            let masked = policy.redact_url(&RequestUrl::new(raw), &mut report);
+            for secret in ["ARR1", "MIX1", "ENC1", "DBL1", "NESTEDQ", "NESTEDPLAIN"] {
+                assert!(
+                    !masked.as_str().contains(secret),
+                    "{raw} kept {secret}: {}",
+                    masked.as_str()
+                );
+            }
+        }
+        assert!(report.query_values >= 6);
+    }
+
+    #[test]
+    fn masking_an_already_masked_nested_url_is_a_noop() {
+        let policy = RedactionPolicy::default();
+        let once = policy
+            .mask_query_params("next=https%3A%2F%2Fevil%2Fcb%3Ftoken%3DFIRST")
+            .expect("the nested parameter is masked");
+        assert!(!once.contains("FIRST"), "{once}");
+        // A second pass must terminate and report no change: re-masking the
+        // marker is what used to spin forever.
+        assert_eq!(policy.mask_query_params(&once), None, "{once}");
+    }
+
+    #[test]
+    fn root_relative_referrers_are_masked_in_headers() {
+        let policy = RedactionPolicy::default();
+        let mut headers =
+            HttpHeaders::from_pairs([("Referer", "/cb?token=RELPATH1"), ("Api-Key", "HDRAPIKEY")]);
+        policy.redact_headers(&mut headers);
+        assert_eq!(headers.get("referer"), Some("/cb?token=[REDACTED]"));
+        assert_eq!(headers.get("api-key"), Some(REDACTION_MARKER));
+    }
+
+    #[test]
+    fn form_bodies_and_plain_text_urls_are_masked() {
+        let policy = RedactionPolicy::default();
+        let mut report = RedactionReport::default();
+        let mut form = Body::captured(
+            Some(ContentType::parse("application/x-www-form-urlencoded")),
+            b"user=ana&token=FORM1&page=2".to_vec(),
+        );
+        policy.redact_body(&mut form, &mut report);
+        let text = form.text().unwrap();
+        assert!(!text.contains("FORM1"), "{text}");
+        assert!(text.contains("user=ana") && text.contains("page=2"));
+
+        let mut plain = Body::captured(
+            Some(ContentType::parse("text/plain")),
+            b"see https://api.test/x?token=TXT1 for details".to_vec(),
+        );
+        policy.redact_body(&mut plain, &mut report);
+        let text = plain.text().unwrap();
+        assert!(!text.contains("TXT1"), "{text}");
+        assert!(text.contains("for details"), "{text}");
     }
 
     #[test]
